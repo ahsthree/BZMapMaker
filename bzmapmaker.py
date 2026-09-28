@@ -31,6 +31,10 @@ TSWAP = {1: 2, 2: 1, 3: 4, 4: 3}  # fixed pairing used by 2-fold symmetry: red<-
 SYM_DEFS = [('', 0), ('rot', 2), ('rot', 3), ('rot', 4), ('mirror_lr', 2), ('mirror_tb', 2)]
 SYM_LABELS = ['Symmetry: off', 'Symmetry: 2-team rotation (180\u00b0)', 'Symmetry: 3-team rotation (120\u00b0)',
               'Symmetry: 4-team rotation (90\u00b0)', 'Symmetry: mirror left-right', 'Symmetry: mirror top-bottom']
+# (bzw keyword, label) per object type. Arc keywords come from wiki.bzflag.org/Arc.
+FACES = {'box': [('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom')],
+         'arc': [('top', 'Top'), ('bottom', 'Bottom'), ('inside', 'Inside'), ('outside', 'Outside'),
+                 ('startside', 'Start side'), ('endside', 'End side')]}
 ACC = QColor('#0f6b6b')
 
 
@@ -41,9 +45,13 @@ class Obj:
     sx: float = 1; sy: float = 1; sz: float = 1
     r: float = 0; team: int = 1; name: str = ''; link: str = ''; blink: str = ''
     matref: str = ''
+    mats: dict = field(default_factory=dict)  # per-face materials (box, arc): face key -> material name
     divisions: int = 16; angle: float = 360.0; ratio: float = 0.0  # arc / cone only
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
+
+    def __post_init__(s):
+        s.mats = dict(s.mats)  # never share the dict between clones
 
 
 @dataclass
@@ -160,6 +168,9 @@ def parse(text):
             team = int(nm(v.get('color'), (1,))[0])
             o = Obj(k, x, y, z, sx, sy, sz, r, team if 1 <= team <= 4 else 1, name)
             o.matref = (v.get('matref') or [''])[0]
+            for fk, _ in FACES.get(k, []):
+                vv = v.get(fk)
+                if vv and len(vv) >= 2 and vv[0].lower() == 'matref': o.mats[fk] = vv[1]
             if k == 'arc':
                 o.divisions = int(nm(v.get('divisions'), (16,))[0])
                 o.angle = nm(v.get('angle'), (360,))[0]
@@ -205,6 +216,13 @@ def obj_block(o):
         if o.ratio: ln.append('  ratio %s' % num(o.ratio))
     if o.t == 'cone': ln.append('  divisions %d' % o.divisions)
     if o.matref: ln.append('  matref %s' % o.matref)
+    if o.t in FACES and o.mats:
+        # BZFlag ignores partial per-face lists on arcs, so unset arc faces fall back to the
+        # all-faces material (or the first face material chosen).
+        fb = o.matref or next((o.mats[k] for k, _ in FACES[o.t] if o.mats.get(k)), '')
+        for fk, _ in FACES[o.t]:
+            name = o.mats.get(fk) or (fb if o.t == 'arc' else '')
+            if name: ln.append('  %s matref %s' % (fk, name))
     return ln + ['end']
 
 
@@ -305,11 +323,21 @@ class Model(QObject):
         mode, fold = o.mode, o.fold
         x0, y0, r0 = _inv(o.fam_k, o.x, o.y, o.r, mode, fold)
         team0 = _team_inv(o.fam_k, o.team, mode, fold)
+        if mode == 'rot' and fold == 3:
+            # Every sibling sits at the same distance from 0,0. A 120-degree turn can push a point
+            # outside a square world unless that distance is at most the half-width (minus the
+            # object's own reach), so limit the shared distance.
+            limit = max(0.0, s.W - math.hypot(o.sx, o.sy)); rad = math.hypot(x0, y0)
+            if rad > limit and rad > 0:
+                x0, y0 = x0 * limit / rad, y0 * limit / rad
+                o.x, o.y, _ = _xform(o.fam_k, x0, y0, r0, mode, fold)
+                s.warn.emit('3-team symmetry: pulled toward the center so all three copies stay inside the world.')
         for q in fam:
             if q is o: continue
             q.x, q.y, q.r = _xform(q.fam_k, x0, y0, r0, mode, fold)
             for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref'):
                 setattr(q, f, getattr(o, f))
+            q.mats = dict(o.mats)
             q.team = _team_fwd(q.fam_k, team0, mode, fold)
         if o.t == 'teleporter' and o.mode in ('mirror_lr', 'mirror_tb'):
             for q in fam:
@@ -455,7 +483,7 @@ class Editor(QWidget):
 
     def draw_leaf(s, p, leaf, sel):
         S = s.v[2]
-        p.save(); p.translate(leaf.x, leaf.y); p.rotate(-leaf.r)
+        p.save(); p.translate(leaf.x, leaf.y); p.rotate(leaf.r)  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
         if leaf.t == 'group':
             hx, hy = s.m.group_bounds(leaf.name)
             p.setPen(cpen('#98a0a8', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
@@ -508,7 +536,7 @@ class Editor(QWidget):
             twin = src is not s.m.sel and s.m.sel and src.fam and src.fam == s.m.sel.fam
             s.draw_leaf(p, leaf, src is s.m.sel)
             if twin:
-                p.save(); p.translate(leaf.x, leaf.y); p.rotate(-leaf.r)
+                p.save(); p.translate(leaf.x, leaf.y); p.rotate(leaf.r)  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
                 pad = 3 / S; a, b = max(leaf.sx, 1), leaf.sy
                 p.setPen(cpen(ACC, 1.5, Qt.PenStyle.DotLine)); p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(QRectF(-a - pad, -b - pad, 2 * a + 2 * pad, 2 * b + 2 * pad)); p.restore()
@@ -614,22 +642,21 @@ class Preview(QWidget):
             a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
             P = lambda lx, ly, z: (o.x + lx * c - ly * sn, o.y + lx * sn + ly * c, z)
             col = QColor(TEAM[o.team] if o.t == 'base' else COL.get(o.t, '#8d939a'))
-            if o.matref in s.m.materials:
-                mc = s.m.materials[o.matref].color; col = QColor(int(mc[0]*255), int(mc[1]*255), int(mc[2]*255), int(mc[3]*255))
+            C = lambda face, o=o, col=col: s.face_color(o, face, col)
             z0 = o.z; z1 = z0 + max(o.sz, .3)
             if o.t == 'arc':
-                F += s.arc_faces(o, P, z0, z1, col); continue
+                F += s.arc_faces(o, P, z0, z1, C); continue
             if o.t == 'cone':
-                F += s.cone_faces(o, P, z0, z1, col); continue
+                F += s.cone_faces(o, P, z0, z1, C('')); continue
             b = [P(-o.sx, -o.sy, z0), P(o.sx, -o.sy, z0), P(o.sx, o.sy, z0), P(-o.sx, o.sy, z0)]
             if o.t == 'pyramid':
                 ap = P(0, 0, z1)
-                F += [([b[i], b[(i + 1) % 4], ap], col, o, None) for i in range(4)] + [(b, col, o, None)]
+                F += [([b[i], b[(i + 1) % 4], ap], C(''), o, None) for i in range(4)] + [(b, C(''), o, None)]
             else:
                 t = [(x, y, z1) for x, y, _ in b]
-                F.append((b, col, o, None)); F.append((t, col, o, None))
+                F.append((b, C('bottom'), o, None)); F.append((t, C('top'), o, None))
                 for i in range(4):
-                    F.append(([b[i], b[(i + 1) % 4], t[(i + 1) % 4], t[i]], col, o, None))
+                    F.append(([b[i], b[(i + 1) % 4], t[(i + 1) % 4], t[i]], C('sides'), o, None))
         h = s.m.W; n = 8; wc = QColor(122, 133, 144, 120)
         for i in range(n):
             a2, b2 = -h + 2 * h * i / n, -h + 2 * h * (i + 1) / n
@@ -637,41 +664,46 @@ class Preview(QWidget):
                 F.append(([(*e1, 0), (*e2, 0), (*e2, 6), (*e1, 6)], wc, None, None))
         return F
 
-    def arc_faces(s, o, P, z0, z1, col):
+    def face_color(s, o, face, default):
+        """Color of one face: its own material, else the object's all-faces material, else default."""
+        name = o.mats.get(face) or o.matref
+        if name in s.m.materials:
+            c = s.m.materials[name].color
+            return QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
+        return default
+
+    def arc_faces(s, o, P, z0, z1, C):
         N, A, ratio = max(3, o.divisions), o.angle, o.ratio
         full = A >= 360
         pts = N + 1 if not full else N
-        outer = [P(o.sx * math.cos(math.radians(A * i / N)), o.sy * math.sin(math.radians(A * i / N)), 0) for i in range(pts)]
+        ang = lambda i: math.radians(A * i / N)
+        outer = [P(o.sx * math.cos(ang(i)), o.sy * math.sin(ang(i)), 0) for i in range(pts)]
+        segs = pts if full else pts - 1
+        V = lambda q, z: (q[0], q[1], z)
         F = []
-        for i in range(pts - 1 if not full else pts):
+        for i in range(segs):
             j = (i + 1) % pts
-            ob0, ob1 = (outer[i][0], outer[i][1], z0), (outer[j][0], outer[j][1], z0)
-            ot0, ot1 = (outer[i][0], outer[i][1], z1), (outer[j][0], outer[j][1], z1)
-            F.append(([ob0, ob1, ot1, ot0], col, o, None))
-        ctr_b, ctr_t = P(0, 0, z0), P(0, 0, z1)
+            F.append(([V(outer[i], z0), V(outer[j], z0), V(outer[j], z1), V(outer[i], z1)], C('outside'), o, None))
         if ratio <= 0:
-            for i in range(pts - 1 if not full else pts):
+            cb, ct = P(0, 0, z0), P(0, 0, z1)
+            for i in range(segs):
                 j = (i + 1) % pts
-                F.append(([ctr_b, (outer[i][0], outer[i][1], z0), (outer[j][0], outer[j][1], z0)], col, o, None))
-                F.append(([ctr_t, (outer[i][0], outer[i][1], z1), (outer[j][0], outer[j][1], z1)], col, o, None))
+                F.append(([cb, V(outer[i], z0), V(outer[j], z0)], C('bottom'), o, None))
+                F.append(([ct, V(outer[i], z1), V(outer[j], z1)], C('top'), o, None))
             if not full:
-                F.append(([ctr_b, (outer[0][0], outer[0][1], z0), (outer[0][0], outer[0][1], z1), ctr_t], col, o, None))
-                F.append(([ctr_b, (outer[-1][0], outer[-1][1], z0), (outer[-1][0], outer[-1][1], z1), ctr_t], col, o, None))
+                F.append(([cb, V(outer[0], z0), V(outer[0], z1), ct], C('startside'), o, None))
+                F.append(([cb, V(outer[-1], z0), V(outer[-1], z1), ct], C('endside'), o, None))
         else:
             ir = 1 - ratio
-            inner = [P(o.sx * ir * math.cos(math.radians(A * i / N)), o.sy * ir * math.sin(math.radians(A * i / N)), 0) for i in range(pts)]
-            for i in range(pts - 1 if not full else pts):
+            inner = [P(o.sx * ir * math.cos(ang(i)), o.sy * ir * math.sin(ang(i)), 0) for i in range(pts)]
+            for i in range(segs):
                 j = (i + 1) % pts
-                F.append(([(inner[i][0], inner[i][1], z0), (inner[j][0], inner[j][1], z0),
-                           (outer[j][0], outer[j][1], z0), (outer[i][0], outer[i][1], z0)], col, o, None))
-                F.append(([(inner[i][0], inner[i][1], z1), (inner[j][0], inner[j][1], z1),
-                           (outer[j][0], outer[j][1], z1), (outer[i][0], outer[i][1], z1)], col, o, None))
-                F.append(([(inner[i][0], inner[i][1], z0), (inner[i][0], inner[i][1], z1),
-                           (inner[j][0], inner[j][1], z1), (inner[j][0], inner[j][1], z0)], col, o, None))
+                F.append(([V(inner[i], z0), V(inner[j], z0), V(outer[j], z0), V(outer[i], z0)], C('bottom'), o, None))
+                F.append(([V(inner[i], z1), V(inner[j], z1), V(outer[j], z1), V(outer[i], z1)], C('top'), o, None))
+                F.append(([V(inner[i], z0), V(inner[i], z1), V(inner[j], z1), V(inner[j], z0)], C('inside'), o, None))
             if not full:
-                for idx in (0, -1):
-                    F.append(([(inner[idx][0], inner[idx][1], z0), (outer[idx][0], outer[idx][1], z0),
-                               (outer[idx][0], outer[idx][1], z1), (inner[idx][0], inner[idx][1], z1)], col, o, None))
+                for idx, face in ((0, 'startside'), (-1, 'endside')):
+                    F.append(([V(inner[idx], z0), V(outer[idx], z0), V(outer[idx], z1), V(inner[idx], z1)], C(face), o, None))
         return F
 
     def cone_faces(s, o, P, z0, z1, col):
@@ -857,7 +889,12 @@ class Win(QMainWindow):
         fl.addRow('Team', s.team); fl.addRow('Group team override', s.gteam); fl.addRow('Group prefab', s.gname)
         fl.addRow('Front links to', s.link); fl.addRow('Back links to', s.blink)
         fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
-        fl.addRow('Material', s.mat)
+        fl.addRow('Material (all faces)', s.mat)
+        s.face = {}
+        for fk, fl_ in (('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom'), ('inside', 'Inside'),
+                        ('outside', 'Outside'), ('startside', 'Start side'), ('endside', 'End side')):
+            cb = QComboBox(); cb.currentTextChanged.connect(lambda t, k=fk: s.edit_face(k, t))
+            fl.addRow(fl_ + ' material', cb); s.face[fk] = cb
         d = QDockWidget('Selected object'); d.setWidget(w); s.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, d)
         s.dock = d; s.on_select()
 
@@ -868,6 +905,14 @@ class Win(QMainWindow):
         setattr(o, k, v)
         if k not in ('link', 'blink', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
+
+    def edit_face(s, k, v):
+        o = s.m.sel
+        if s.busy or not o: return
+        if not s.pushed: s.m.push(); s.pushed = True
+        if v: o.mats[k] = v
+        else: o.mats.pop(k, None)
+        s.m.sync_family(o); s.busy = True; s.m.changed.emit(); s.busy = False
 
     def on_select(s):
         s.pushed = False; s.refresh()
@@ -890,6 +935,12 @@ class Win(QMainWindow):
             row = s.dock.widget().layout().labelForField(widget)
             widget.setVisible(bool(vis))
             if row: row.setVisible(bool(vis))
+        lay = s.dock.widget().layout()
+        for fk, cb in s.face.items():
+            show = bool(o and any(k == fk for k, _ in FACES.get(o.t, [])))
+            cb.setVisible(show)
+            lab = lay.labelForField(cb)
+            if lab: lab.setVisible(show)
         if o:
             for k, b in s.sp.items(): b.setValue(getattr(o, k))
             s.team.setCurrentIndex(o.team - 1 if o.t == 'base' else 0)
@@ -901,6 +952,10 @@ class Win(QMainWindow):
                 cb.setCurrentText(cur or 'Nothing')
             s.div.setValue(o.divisions); s.ang.setValue(o.angle if o.angle else 360); s.rat.setValue(o.ratio)
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
+            for fk, cb in s.face.items():
+                cur = o.mats.get(fk, '')
+                cb.clear(); cb.addItems([''] + sorted(set(s.m.materials) | ({cur} if cur else set())))
+                cb.setCurrentText(cur)
         s.ws.setValue(s.m.W); s.busy = False
 
     def set_world(s, v):
