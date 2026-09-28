@@ -6,7 +6,7 @@ Works on Windows, macOS and Linux. The 3D preview is drawn in software (QPainter
 OpenGL is required. Textures are applied to box faces with Qt's 2D projective quadToQuad
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
-import sys, os, math, json
+import sys, os, math, json, hashlib
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
@@ -20,11 +20,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDoc
 # Data model
 # ---------------------------------------------------------------------------
 DEF = {'box': (10, 10, 9.4), 'pyramid': (8.2, 8.2, 8.2), 'base': (20, 20, 0),
-       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1)}
+       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0)}
 TEAM = ['', '#c8453b', '#3c9a5a', '#3a6fc4', '#8a55b5']
 TEAM_NAMES = ['', 'Red', 'Green', 'Blue', 'Purple']
 COL = {'box': '#8d939a', 'pyramid': '#b08a4e', 'teleporter': '#d0702a', 'arc': '#5c8a7a',
-       'cone': '#7a6a9a', 'group': '#a0a4ad'}
+       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8'}
 TSWAP = {1: 2, 2: 1, 3: 4, 4: 3}  # fixed pairing used by 2-fold symmetry: red<->green, blue<->purple
 # index -> (mode, fold). mode 'rot' = N-way rotation about the world center; the two mirror
 # modes are always a simple left-right or top-bottom reflection (fold is always 2 for those).
@@ -46,6 +46,7 @@ class Obj:
     r: float = 0; team: int = 1; name: str = ''; link: str = ''; blink: str = ''
     matref: str = ''
     mats: dict = field(default_factory=dict)  # per-face materials (box, arc): face key -> material name
+    mesh: str = ''  # key into MESHDATA: the mesh block's original text, kept verbatim
     divisions: int = 16; angle: float = 360.0; ratio: float = 0.0  # arc / cone only
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
@@ -59,6 +60,8 @@ class Material:
     name: str
     texture: str = ''
     color: tuple = (1.0, 1.0, 1.0, 1.0)
+    extra: list = field(default_factory=list)  # every other line (addtexture, texmat, ambient...), kept as-is
+    raw: list = field(default_factory=list)    # the block's original lines; written back unchanged until edited
 
 
 def num(v):
@@ -103,13 +106,82 @@ def _team_inv(k, team, mode, fold):
 
 
 # ---- .bzw reading -----------------------------------------------------------------
+MESHDATA = {}  # key -> the mesh block's original lines (normals, texcoords, phydrv, drawinfo... untouched)
+_MESHGEO = {}
+
+
+def mesh_register(body):
+    key = hashlib.sha1('\n'.join(body).encode('utf-8', 'replace')).hexdigest()[:16]
+    MESHDATA[key] = list(body)
+    return key
+
+
+def _spin(v, ang, ax):
+    n = math.sqrt(sum(a * a for a in ax))
+    if not n: return v
+    ux, uy, uz = (a / n for a in ax); t = math.radians(ang); c, sn = math.cos(t), math.sin(t)
+    x, y, z = v; d = ux * x + uy * y + uz * z
+    return [x * c + (uy * z - uz * y) * sn + ux * d * (1 - c),
+            y * c + (uz * x - ux * z) * sn + uy * d * (1 - c),
+            z * c + (ux * y - uy * x) * sn + uz * d * (1 - c)]
+
+
+def mesh_geom(key):
+    """(vertices after the mesh's own shift/scale/spin, [(vertex indices, material name)]).
+    Only used for drawing; the saved file always uses the original text. Shear is ignored."""
+    g = _MESHGEO.get(key)
+    if g is not None: return g
+    verts, faces, xf, cur, face, depth = [], [], [], '', None, 0
+    for ln in MESHDATA.get(key, []):
+        p = ln.split(); k = p[0].lower()
+        if depth:  # drawinfo holds its own vertex lists, so skip it
+            if k in ('lod', 'radarlod'): depth += 1
+            elif k == 'end': depth -= 1
+            continue
+        try:
+            if face is not None:
+                if k == 'vertices': face[0] = [int(a) for a in p[1:]]
+                elif k == 'matref' and len(p) > 1: face[1] = p[1]
+                elif k == 'endface': faces.append((face[0], face[1])); face = None
+            elif k == 'vertex':
+                v = [float(a) for a in p[1:4]]
+                if len(v) == 3: verts.append(v)
+            elif k in ('shift', 'scale', 'spin'): xf.append((k, [float(a) for a in p[1:]]))
+            elif k == 'matref' and len(p) > 1: cur = p[1]
+            elif k == 'face': face = [[], cur]
+            elif k == 'drawinfo': depth = 1
+        except ValueError:
+            pass
+    for k, a in xf:
+        if k == 'shift' and len(a) >= 3: verts = [[v[0] + a[0], v[1] + a[1], v[2] + a[2]] for v in verts]
+        elif k == 'scale' and len(a) >= 3: verts = [[v[0] * a[0], v[1] * a[1], v[2] * a[2]] for v in verts]
+        elif k == 'spin' and len(a) >= 4: verts = [_spin(v, a[0], a[1:4]) for v in verts]
+    g = _MESHGEO[key] = ([tuple(v) for v in verts], faces)
+    return g
+
+
+def mesh_world(o):
+    """World-space vertices of a mesh object: (v + pre-shift) turned by r about Z, then shifted."""
+    verts, faces = mesh_geom(o.mesh)
+    a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
+    out = []
+    for x, y, z in verts:
+        x += o.sx; y += o.sy; z += o.sz
+        out.append((x * c - y * sn + o.x, x * sn + y * c + o.y, z + o.z))
+    return out, faces
+
+
 def parse(text):
-    """Read world, box, pyramid, base, teleporter, arc, cone, material, define/group and
-    link blocks. Anything else (walls, meshes, physics drivers...) is skipped."""
+    """Read world, box, pyramid, base, teleporter, arc, cone, mesh, material, define/group
+    and link blocks. Meshes and materials keep their original text; any other block
+    (physics, zones, dynamic colors...) is returned verbatim in `extras` so it isn't lost."""
     lines = [ln.split('#', 1)[0].rstrip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln.strip()]
     i = 0
-    nw, objs, materials, defines, links = None, [], {}, {}, []
+    nw, objs, materials, defines, links, extras = None, [], {}, {}, [], []
+    TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
+           'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
+           'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
 
     def nm(a, d):
         out = []
@@ -127,6 +199,19 @@ def parse(text):
             v[p[0].lower()] = p[1:]
         return v
 
+    def read_raw_block():
+        # A block closes at an 'end' followed by another top-level keyword (or end of file),
+        # so nested 'end's, such as inside drawinfo, stay part of the block.
+        nonlocal i
+        body = []
+        while i < len(lines):
+            line = lines[i].strip(); i += 1
+            if line.split()[0].lower() == 'end':
+                nxt = lines[i].split()[0].lower() if i < len(lines) else ''
+                if not nxt or nxt in TOP: return body
+            body.append(line)
+        return body
+
     while i < len(lines):
         p = lines[i].split(); i += 1
         k = p[0].lower()
@@ -135,13 +220,22 @@ def parse(text):
             try: nw = float(v['size'][0])
             except Exception: pass
         elif k == 'material':
-            v = read_block()
-            name = (v.get('name') or [p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1)])[0]
-            tex = (v.get('texture') or [''])[0]
-            col = v.get('color', v.get('diffuse', ['1', '1', '1', '1']))
-            try: color = tuple(float(c) for c in (col + ['1', '1', '1', '1'])[:4])
-            except Exception: color = (1.0, 1.0, 1.0, 1.0)
-            materials[name] = Material(name, tex, color)
+            body = read_raw_block()
+            name, tex, color, extra = '', '', (1.0, 1.0, 1.0, 1.0), []
+            for ln in body:
+                q = ln.split(); kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: name = q[1]
+                elif kk == 'texture' and len(q) > 1: tex = q[1]
+                elif kk in ('diffuse', 'color'):  # 'color' is a synonym for 'diffuse'
+                    try: color = tuple(float(c) for c in (q[1:] + ['1', '1', '1', '1'])[:4])
+                    except ValueError: pass
+                else: extra.append(ln)
+            name = name or (p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1))
+            materials[name] = Material(name, tex, color, extra, list(body))
+        elif k == 'mesh':
+            body = read_raw_block()
+            name = next((b.split()[1] for b in body if b.lower().startswith('name ') and len(b.split()) > 1), '')
+            o = Obj('mesh', 0, 0, 0, 0, 0, 0, 0, 1, name); o.mesh = mesh_register(body); objs.append(o)
         elif k == 'link':
             v = read_block(); links.append(((v.get('from') or [''])[0], (v.get('to') or [''])[0]))
         elif k == 'define':
@@ -150,7 +244,7 @@ def parse(text):
             while i < len(lines):
                 if lines[i].split()[0].lower() == 'enddef': i += 1; break
                 sub.append(lines[i]); i += 1
-            _, kids, _, _ = parse('\n'.join(sub))
+            _, kids, _, _, _ = parse('\n'.join(sub))
             defines[name] = kids
         elif k == 'group':
             v = read_block()
@@ -161,7 +255,9 @@ def parse(text):
             objs.append(Obj('group', x, y, z, 1, 1, 1, r, team, name))
         elif k in ('box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
             v = read_block()
-            name = (v.get('name') or [''])[0]
+            # Old maps often name a teleporter right on its opening line ('teleporter home')
+            # instead of a 'name' line inside the block; accept either.
+            name = (v.get('name') or [p[1] if len(p) > 1 and k == 'teleporter' else ''])[0]
             x, y, z = nm(v.get('position', v.get('pos')), (0, 0, 0))
             sx, sy, sz = nm(v.get('size'), DEF[k])
             r = nm(v.get('rotation', v.get('rot')), (0,))[0]
@@ -178,8 +274,13 @@ def parse(text):
             if k == 'cone':
                 o.divisions = int(nm(v.get('divisions'), (16,))[0])
             objs.append(o)
-        else:
-            read_block()  # unknown block type: skip to its closing 'end'
+        elif k in ('end', 'enddef'):
+            continue  # stray terminator
+        else:  # a block we don't edit: keep it word for word
+            opener = lines[i - 1].strip(); body = read_raw_block()
+            extras.append('\n'.join([opener] + ['  ' + b for b in body] + ['end']))
+    # Keep every explicit, unique name exactly as given -- only blank or duplicate names
+    # get replaced, so re-opening a map you already built here won't rename anything.
     seen = set()
     for o in objs:
         if o.t == 'teleporter':
@@ -190,16 +291,32 @@ def parse(text):
         if o.t == 'teleporter' and not o.name:
             while 't%d' % j in seen: j += 1
             o.name = 't%d' % j; seen.add(o.name)
+
+    # Older maps often link teleporters by plain 0-based index instead of name, and/or
+    # write 'from'/'to' with no ':f'/':b' face suffix at all. Handle both.
+    tele_order = [o for o in objs if o.t == 'teleporter']
+
+    def resolve(ident, default_face):
+        name, sep, face = ident.rpartition(':')
+        if not sep: name, face = ident, default_face
+        face = face.lower() or default_face
+        if name.isdigit() and 0 <= int(name) < len(tele_order): name = tele_order[int(name)].name
+        return name, face
+
     for f, t in links:
-        fn, _, face = f.rpartition(':'); tn = t.rpartition(':')[0] or t
+        fn, fface = resolve(f, 'f'); tn, _ = resolve(t, 'b')
         for o in objs:
             if o.t == 'teleporter' and o.name == fn:
-                if face.lower() == 'f': o.link = tn
-                elif face.lower() == 'b': o.blink = tn
-    return nw, objs, materials, defines
+                if fface == 'f': o.link = tn
+                elif fface == 'b': o.blink = tn
+    return nw, objs, materials, defines, extras
 
 
 def obj_block(o):
+    if o.t == 'mesh':
+        ln = ['mesh'] + ['  ' + b for b in MESHDATA.get(o.mesh, [])]
+        if o.x or o.y or o.z: ln.append('  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)))
+        return ln + ['end']
     if o.t == 'group':
         ln = ['group %s' % o.name, '  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)),
               '  rotation %s' % num(o.r)]
@@ -227,10 +344,11 @@ def obj_block(o):
 
 
 def material_block(m):
+    if m.raw: return ['material'] + ['  ' + b for b in m.raw] + ['end']  # untouched since import
     ln = ['material', '  name %s' % m.name]
     if m.texture: ln.append('  texture %s' % m.texture)
     ln.append('  color %s %s %s %s' % tuple(num(c) for c in m.color))
-    return ln + ['end']
+    return ln + ['  ' + e for e in m.extra] + ['end']
 
 
 class Model(QObject):
@@ -239,13 +357,13 @@ class Model(QObject):
     def __init__(s):
         super().__init__()
         s.W, s.objs, s.sel, s.msel, s.undo, s.path = 400, [], None, [], [], None
-        s.materials, s.defines, s.texcache = {}, {}, {}
+        s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.nid, s.sym = 1, 0
 
     def push(s):
         d = {'W': s.W, 'objs': [asdict(o) for o in s.objs],
              'materials': {k: asdict(v) for k, v in s.materials.items()},
-             'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}}
+             'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -254,6 +372,7 @@ class Model(QObject):
         s.W, s.objs, s.sel, s.msel = d['W'], [Obj(**o) for o in d['objs']], None, []
         s.materials = {k: Material(**v) for k, v in d['materials'].items()}
         s.defines = {k: [Obj(**o) for o in v] for k, v in d['defines'].items()}
+        s.extras = d.get('extras', [])
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
 
@@ -281,7 +400,7 @@ class Model(QObject):
 
     # ---- symmetry families ---------------------------------------------------
     def make_family(s, o):
-        if not s.sym or o.fam: return
+        if not s.sym or o.fam or o.t == 'mesh': return
         mode, fold = SYM_DEFS[s.sym]
         s.nid += 0
         fam = 'f%d' % o.uid
@@ -396,8 +515,9 @@ class Model(QObject):
         return name
 
     def load(s, text, folder=None):
-        nw, objs, materials, defines = parse(text)
+        nw, objs, materials, defines, extras = parse(text)
         s.push(); s.W = nw or s.W; s.objs = objs; s.materials = materials; s.defines = defines
+        s.extras = extras
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
         s.texcache = {}
@@ -405,6 +525,7 @@ class Model(QObject):
 
     def text(s):
         out = ['# Made with BZ Map Maker', 'world', '  size %s' % num(s.W), 'end', '']
+        for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
         for name, kids in s.defines.items():
             out.append('define %s' % name)
@@ -431,6 +552,9 @@ def expand(model):
                 leaf.x, leaf.y = o.x + kd.x * c - kd.y * sn, o.y + kd.x * sn + kd.y * c
                 leaf.z, leaf.r = o.z + kd.z, (kd.r + o.r) % 360
                 if leaf.t == 'base' and o.team: leaf.team = o.team
+                if leaf.t == 'mesh':  # kept as: (mesh + its own shift), turned by the group, then shifted
+                    leaf.sx, leaf.sy, leaf.sz = kd.x, kd.y, kd.z
+                    leaf.x, leaf.y, leaf.z = o.x, o.y, o.z
                 out.append((leaf, o))
         else:
             out.append((o, o))
@@ -475,6 +599,11 @@ class Editor(QWidget):
     def hit(s, wx, wy):
         pad = 4 / s.v[2]
         for leaf, src in reversed(expand(s.m)):
+            if leaf.t == 'mesh':
+                W, _ = mesh_world(leaf)
+                if W and min(v[0] for v in W) - pad <= wx <= max(v[0] for v in W) + pad \
+                        and min(v[1] for v in W) - pad <= wy <= max(v[1] for v in W) + pad: return src
+                continue
             hx, hy = (max(leaf.sx, leaf.sy, 5) if leaf.t == 'group' else leaf.sx), leaf.sy
             if leaf.t == 'group': hx, hy = s.m.group_bounds(leaf.name)
             a = math.radians(leaf.r); dx, dy = wx - leaf.x, wy - leaf.y
@@ -483,6 +612,18 @@ class Editor(QWidget):
 
     def draw_leaf(s, p, leaf, sel):
         S = s.v[2]
+        if leaf.t == 'mesh':  # meshes are drawn straight in world coordinates
+            W, faces = mesh_world(leaf)
+            c = QColor(COL['mesh']); c.setAlpha(70); p.setPen(cpen('#4a5058')); p.setBrush(c)
+            for idx, _m in faces:
+                pts = [QPointF(W[i][0], W[i][1]) for i in idx if 0 <= i < len(W)]
+                if len(pts) >= 3: p.drawPolygon(QPolygonF(pts))
+            if sel and W:
+                pad = 3 / S; x0, x1 = min(v[0] for v in W), max(v[0] for v in W)
+                y0, y1 = min(v[1] for v in W), max(v[1] for v in W)
+                p.setPen(cpen(ACC, 2.5, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(QRectF(x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad))
+            return
         p.save(); p.translate(leaf.x, leaf.y); p.rotate(leaf.r)  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
         if leaf.t == 'group':
             hx, hy = s.m.group_bounds(leaf.name)
@@ -639,6 +780,8 @@ class Preview(QWidget):
         F = []
         for leaf, src in expand(s.m):
             o = leaf
+            if o.t == 'mesh':
+                F += s.mesh_faces(o, src); continue
             a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
             P = lambda lx, ly, z: (o.x + lx * c - ly * sn, o.y + lx * sn + ly * c, z)
             col = QColor(TEAM[o.team] if o.t == 'base' else COL.get(o.t, '#8d939a'))
@@ -663,6 +806,18 @@ class Preview(QWidget):
             for e1, e2 in (((a2, -h), (b2, -h)), ((a2, h), (b2, h)), ((-h, a2), (-h, b2)), ((h, a2), (h, b2))):
                 F.append(([(*e1, 0), (*e2, 0), (*e2, 6), (*e1, 6)], wc, None, None))
         return F
+
+    def mesh_faces(s, o, src):
+        W, faces = mesh_world(o); out = []
+        for idx, mat in faces:
+            pts = [W[i] for i in idx if 0 <= i < len(W)]
+            if len(pts) < 3: continue
+            col = QColor(COL['mesh'])
+            if mat in s.m.materials:
+                c = s.m.materials[mat].color
+                col = QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
+            out.append((pts, col, src, None))
+        return out
 
     def face_color(s, o, face, default):
         """Color of one face: its own material, else the object's all-faces material, else default."""
@@ -770,14 +925,19 @@ def _qpath(poly):
 # Materials dialog
 # ---------------------------------------------------------------------------
 class MaterialsDialog(QDialog):
+    APPROVED = 'http://images.bzflag.org/'
+
     def __init__(s, m, folder):
-        super().__init__(); s.m, s.folder, s.cur = m, folder, None
+        super().__init__(); s.m, s.folder, s.cur, s._fixing = m, folder, None, False
         s.setWindowTitle('Materials'); s.resize(480, 360)
         root = QHBoxLayout(s)
         s.list = QListWidget(); s.list.addItems(sorted(m.materials)); s.list.currentTextChanged.connect(s.pick)
         root.addWidget(s.list, 1)
         col = QVBoxLayout(); root.addLayout(col, 2)
-        s.name = QLineEdit(); s.tex = QLineEdit(); s.tex.setPlaceholderText('texture name, no .png extension')
+        s.name = QLineEdit()
+        s.tex = QLineEdit()
+        s.tex.setPlaceholderText('local texture name (no .png), or paste a full http:// image URL')
+        s.tex.textChanged.connect(s.check_tex)
         browse = QPushButton('Load PNG...'); browse.clicked.connect(s.browse)
         rgb = QHBoxLayout(); s.r = QDoubleSpinBox(); s.g = QDoubleSpinBox(); s.b = QDoubleSpinBox(); s.al = QDoubleSpinBox()
         for sp in (s.r, s.g, s.b, s.al): sp.setRange(0, 1); sp.setSingleStep(.05); sp.setValue(1); rgb.addWidget(sp)
@@ -785,12 +945,16 @@ class MaterialsDialog(QDialog):
         trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse)
         form.addRow('Texture', trow); form.addRow('Color R G B A', rgb)
         col.addLayout(form)
+        s.texwarn = QLabel(); s.texwarn.setWordWrap(True); s.texwarn.setStyleSheet('color:#b5651d')
+        col.addWidget(s.texwarn)
         btns = QHBoxLayout()
         add = QPushButton('Add / Update'); add.clicked.connect(s.save)
         rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
         btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
-        note = QLabel('Only box faces are textured in the 3D preview; other shapes use the '
-                       'material color. Put the .png next to your saved .bzw file so it loads next time.')
+        note = QLabel('Material colors show in the 3D preview. Textures and every other material setting '
+                       '(addtexture, texmat, ambient...) are kept in the file but are not drawn yet.\n'
+                       'For a texture on the internet, paste its full URL (e.g. ' + s.APPROVED + 'someone/name.png). '
+                       'The game only loads http://, so a pasted https:// link is switched to http:// automatically.')
         note.setWordWrap(True); col.addWidget(note)
         col.addStretch()
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
@@ -802,6 +966,23 @@ class MaterialsDialog(QDialog):
             s.name.setText(s.cur.name); s.tex.setText(s.cur.texture)
             for sp, v in zip((s.r, s.g, s.b, s.al), s.cur.color): sp.setValue(v)
 
+    def check_tex(s, text):
+        """The game only fetches http://, never https://, so silently drop the 's'. Then warn --
+        without blocking -- if the URL isn't on the one server BZFlag leagues approve textures from."""
+        if s._fixing: return
+        if text.lower().startswith('https://'):
+            s._fixing = True; pos = s.tex.cursorPosition()
+            s.tex.setText('http://' + text[8:]); s.tex.setCursorPosition(max(0, pos - 1))
+            s._fixing = False; return  # setText re-triggers this handler with the fixed text
+        if '://' not in text:
+            s.texwarn.setText(''); return
+        msgs = []
+        if not text.lower().startswith(s.APPROVED.lower()):
+            msgs.append('Not under %s -- BZFlag leagues will not approve this texture.' % s.APPROVED)
+        if not text.lower().endswith('.png'):
+            msgs.append('A texture URL needs the .png file extension.')
+        s.texwarn.setText(' '.join(msgs))
+
     def browse(s):
         path, _ = QFileDialog.getOpenFileName(s, 'Load texture', s.folder or '', 'PNG images (*.png)')
         if not path: return
@@ -811,7 +992,9 @@ class MaterialsDialog(QDialog):
     def save(s):
         name = s.name.text().strip()
         if not name: return
-        mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()))
+        old = s.m.materials.get(name)
+        mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()),
+                       list(old.extra) if old else [])  # keep addtexture/texmat/etc. when you edit
         s.m.materials[name] = mat
         if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
         s.m.changed.emit()
@@ -856,6 +1039,7 @@ class Win(QMainWindow):
         s.act(e, 'Group Selected (Ctrl+click to multi-select)', s.do_group, 'Ctrl+G')
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
+        s.act(ob, 'Import Mesh Object...', s.import_mesh)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
         for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
@@ -922,8 +1106,8 @@ class Win(QMainWindow):
         o = s.m.sel; s.busy = True
         s.dock.widget().setEnabled(o is not None)
         s.dock.setWindowTitle('Selected object' + (': ' + o.t + (' ' + o.name if o.name else '') if o else ''))
-        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t != 'group', 'sy': o and o.t != 'group',
-                'sz': o and o.t != 'group', 'r': True, 'team': o and o.t == 'base',
+        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('group', 'mesh'), 'sy': o and o.t not in ('group', 'mesh'),
+                'sz': o and o.t not in ('group', 'mesh'), 'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
                 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group',
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
@@ -967,6 +1151,32 @@ class Win(QMainWindow):
 
     def open_materials(s):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
+
+    def import_mesh(s):
+        """Pull one or more 'mesh ... end' objects out of another .bzw (or a file that's
+        just a mesh block on its own) and drop them into the current map at the origin."""
+        folder = os.path.dirname(s.m.path) if s.m.path else ''
+        path, _ = QFileDialog.getOpenFileName(s, 'Import mesh object', folder, 'BZFlag world files (*.bzw);;All files (*)')
+        if not path: return
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
+        except OSError as e:
+            QMessageBox.warning(s, 'Import failed', str(e)); return
+        nw, objs, materials, defines, extras = parse(text)
+        meshes = [o for o in objs if o.t == 'mesh']
+        if not meshes:
+            QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
+        s.m.push()
+        for mo in meshes:
+            mo.uid = s.m.nid; s.m.nid += 1
+            s.m.objs.append(mo)
+        for name, mat in materials.items():  # bring along any materials the mesh's faces refer to
+            s.m.materials.setdefault(name, mat)
+        s.m.select(meshes[-1]); s.m.changed.emit()
+        skipped = len(objs) - len(meshes)
+        msg = 'Imported %d mesh object%s from %s.' % (len(meshes), '' if len(meshes) == 1 else 's', os.path.basename(path))
+        if skipped: msg += ' (%d other object%s in that file %s not imported.)' % (skipped, '' if skipped == 1 else 's', 'was' if skipped == 1 else 'were')
+        s.statusBar().showMessage(msg, 8000)
 
     def title(s): s.setWindowTitle('BZ Map Maker - ' + (s.m.path or 'untitled'))
 
