@@ -8,7 +8,7 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, math, json, hashlib
 from dataclasses import dataclass, field, asdict, replace
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
                           QActionGroup, QKeySequence, QPixmap, QTransform)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
@@ -694,6 +694,20 @@ class Editor(QWidget):
                 if o.t == 'teleporter':
                     p.drawText(QPointF(s.width() / 2 + s.v[0] + (o.x + o.sx + 3 / S) * S,
                                         s.height() / 2 + s.v[1] - o.y * S), o.name)
+        p.resetTransform(); s.draw_compass(p)
+
+    def draw_compass(s, p):
+        """This view never rotates -- up is always +Y, right is always +X -- so the compass is static."""
+        cx, cy, R = 46, 46, 27
+        p.setPen(QPen(QColor('#22262b', ), 1)); p.setBrush(QColor(246, 245, 240, 210))
+        p.drawEllipse(QPointF(cx, cy), R + 15, R + 15)
+        for dx, dy, label, col in ((1, 0, '+X', '#c8453b'), (-1, 0, '−X', '#c8453b'),
+                                    (0, -1, '+Y', '#3c9a5a'), (0, 1, '−Y', '#3c9a5a')):
+            p.setPen(QPen(QColor(col), 2))
+            p.drawLine(QPointF(cx, cy), QPointF(cx + dx * R, cy + dy * R))
+            p.setPen(QColor('#22262b'))
+            p.drawText(QRectF(cx + dx * R - 12 + (0 if dx else 0), cy + dy * R - 9, 24, 18),
+                       Qt.AlignmentFlag.AlignCenter, label)
 
     def mousePressEvent(s, e):
         s.setFocus(); p = e.position(); wx, wy = s.tow(p); b = e.button()
@@ -905,6 +919,34 @@ class Preview(QWidget):
             p.setBrush(sh); p.setPen(QPen(ACC.lighter(150), 2) if o is s.m.sel else QPen(QColor(0, 0, 0, 90), 1))
             p.drawPolygon(pg)
         p.setPen(QColor('#98a0a8')); p.drawText(10, s.height() - 10, 'Drag to orbit, scroll to zoom')
+        s.draw_gizmo(p, B)
+
+    def draw_gizmo(s, p, B):
+        """A small axis widget, fixed to a screen corner, that turns to match the current
+        camera orientation -- the same trick CAD/3D tools use to show which way you're facing."""
+        pos, f, r, u = B
+        cx, cy, R = 52, 52, 34
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(27, 32, 38, 170))
+        p.drawEllipse(QPointF(cx, cy), R + 14, R + 14)
+        axes = (('X', (1.0, 0.0, 0.0), QColor('#e0645c')), ('Y', (0.0, 1.0, 0.0), QColor('#5cc47e')),
+                ('Z', (0.0, 0.0, 1.0), QColor('#5c8ce0')))
+        ends = []
+        for name, v, col in axes:
+            sx = sum(v[i] * r[i] for i in range(3)); sy = sum(v[i] * u[i] for i in range(3))
+            depth = sum(v[i] * f[i] for i in range(3))
+            ends.append((depth, cx + sx * R, cy - sy * R, col, name, True))
+            ends.append((-depth, cx - sx * R, cy + sy * R, col, name, False))
+        for _, ex, ey, col, name, is_pos in ends:  # farthest end of each axis drawn first, so nearer ones sit on top
+            p.setPen(QPen(col, 2)); p.drawLine(QPointF(cx, cy), QPointF(ex, ey))
+        for depth, ex, ey, col, name, is_pos in sorted(ends, key=lambda e: -e[0]):
+            if is_pos:
+                p.setPen(QPen(QColor('#1b2026'), 1)); p.setBrush(col)
+            else:
+                p.setPen(QPen(col, 1.5)); p.setBrush(QColor('#1b2026'))
+            p.drawEllipse(QPointF(ex, ey), 9, 9)
+            if is_pos:
+                p.setPen(QColor('#ffffff'))
+                p.drawText(QRectF(ex - 8, ey - 8, 16, 16), Qt.AlignmentFlag.AlignCenter, name)
 
     def mousePressEvent(s, e): s.last = e.position()
 
@@ -1018,6 +1060,8 @@ class Win(QMainWindow):
         super().__init__(); s.m = Model(); s.resize(1340, 800)
         s.ed, s.pv = Editor(s.m), Preview(s.m)
         sp = QSplitter(); sp.addWidget(s.ed); sp.addWidget(s.pv); sp.setSizes([670, 670]); s.setCentralWidget(sp)
+        s.settings = QSettings('BZMapMaker', 'BZMapMaker')
+        s.recent = [p for p in s.settings.value('recentFiles', []) or [] if isinstance(p, str)]
         s.busy = s.pushed = False; s.build_menus(); s.build_panel(); s.statusBar()
         s.m.selected.connect(s.on_select); s.m.changed.connect(s.refresh)
         s.m.warn.connect(lambda msg: s.statusBar().showMessage(msg, 8000))
@@ -1032,6 +1076,7 @@ class Win(QMainWindow):
     def build_menus(s):
         f = s.menuBar().addMenu('&File')
         s.act(f, 'New', s.new, 'Ctrl+N'); s.act(f, 'Open...', lambda: s.open_file(), 'Ctrl+O')
+        s.recent_menu = f.addMenu('Open &Recent'); s.rebuild_recent()
         s.act(f, 'Save', s.save, 'Ctrl+S'); s.act(f, 'Save As...', lambda: s.save(True), 'Ctrl+Shift+S')
         e = s.menuBar().addMenu('&Edit')
         s.act(e, 'Undo', s.m.pop, 'Ctrl+Z'); s.act(e, 'Duplicate', s.m.duplicate, 'Ctrl+D')
@@ -1180,6 +1225,31 @@ class Win(QMainWindow):
 
     def title(s): s.setWindowTitle('BZ Map Maker - ' + (s.m.path or 'untitled'))
 
+    def add_recent(s, path):
+        path = os.path.abspath(path)
+        s.recent = [path] + [p for p in s.recent if p != path]
+        s.recent = s.recent[:12]
+        s.settings.setValue('recentFiles', s.recent)
+        s.rebuild_recent()
+
+    def rebuild_recent(s):
+        s.recent_menu.clear()
+        existing = [p for p in s.recent if os.path.isfile(p)]
+        if existing != s.recent:  # quietly drop files that were moved or deleted since last time
+            s.recent = existing; s.settings.setValue('recentFiles', s.recent)
+        if not existing:
+            a = s.recent_menu.addAction('(no recent files)'); a.setEnabled(False); return
+        for i, p in enumerate(existing):
+            label = '%d  %s   [%s]' % (i + 1, os.path.basename(p), os.path.dirname(p))
+            act = QAction(label, s); act.triggered.connect(lambda _, p=p: s.open_file(p))
+            s.recent_menu.addAction(act)
+        s.recent_menu.addSeparator()
+        clr = QAction('Clear Recent Files', s); clr.triggered.connect(s.clear_recent)
+        s.recent_menu.addAction(clr)
+
+    def clear_recent(s):
+        s.recent = []; s.settings.setValue('recentFiles', []); s.rebuild_recent()
+
     def new(s):
         s.m.push(); s.m.__init__(); s.m.path = None
         s.m.reset.emit(); s.m.selected.emit(); s.m.changed.emit(); s.title()
@@ -1199,7 +1269,7 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Open failed', str(e)); return
-        s.m.load(text); s.m.path = path; s.load_textures(os.path.dirname(path)); s.title()
+        s.m.load(text); s.m.path = path; s.load_textures(os.path.dirname(path)); s.title(); s.add_recent(path)
 
     def save(s, as_new=False):
         path = s.m.path
@@ -1210,7 +1280,7 @@ class Win(QMainWindow):
             with open(path, 'w', encoding='utf-8') as f: f.write(s.m.text())
         except OSError as e:
             QMessageBox.warning(s, 'Save failed', str(e)); return
-        s.m.path = path; s.load_textures(os.path.dirname(path)); s.title()
+        s.m.path = path; s.load_textures(os.path.dirname(path)); s.title(); s.add_recent(path)
 
 
 if __name__ == '__main__':
