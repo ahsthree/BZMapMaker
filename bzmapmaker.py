@@ -9,13 +9,13 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 import sys, os, math, json, hashlib
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
                           QActionGroup, QKeySequence, QPixmap, QTransform, QImage)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
-                              QDialogButtonBox, QInputDialog)
+                              QDialogButtonBox, QInputDialog, QPlainTextEdit, QCheckBox)
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -459,7 +459,8 @@ class Model(QObject):
             for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref'):
                 setattr(q, f, getattr(o, f))
             q.mats = dict(o.mats)
-            q.team = _team_fwd(q.fam_k, team0, mode, fold)
+            if o.t in ('base', 'group'):  # team means something for these only -- everything
+                q.team = _team_fwd(q.fam_k, team0, mode, fold)  # else keeps its untouched default
         if o.t == 'teleporter' and o.mode in ('mirror_lr', 'mirror_tb'):
             for q in fam:
                 if q is not o: q.r = (o.r + 180) % 360  # forces front/back to line up on a mirror
@@ -1157,6 +1158,21 @@ def _qpath(poly):
 # ---------------------------------------------------------------------------
 # Materials dialog
 # ---------------------------------------------------------------------------
+def average_color(img):
+    """Mean color of an image, scaled down first so this stays cheap regardless of the
+    source resolution. Used so a textured object shows roughly the right color in the 3D
+    view instead of plain white, since the view doesn't actually draw texture images."""
+    small = img.scaled(8, 8, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    small = small.convertToFormat(QImage.Format.Format_RGBA8888)
+    n = small.width() * small.height()
+    if not n: return (1.0, 1.0, 1.0, 1.0)
+    r = g = b = 0
+    for y in range(small.height()):
+        for x in range(small.width()):
+            c = small.pixelColor(x, y); r += c.red(); g += c.green(); b += c.blue()
+    return (r / n / 255, g / n / 255, b / n / 255, 1.0)
+
+
 class MaterialsDialog(QDialog):
     APPROVED = 'http://images.bzflag.org/'
 
@@ -1172,10 +1188,11 @@ class MaterialsDialog(QDialog):
         s.tex.setPlaceholderText('local texture name (no .png), or paste a full http:// image URL')
         s.tex.textChanged.connect(s.check_tex)
         browse = QPushButton('Load PNG...'); browse.clicked.connect(s.browse)
+        fetch = QPushButton('Fetch Color from URL'); fetch.clicked.connect(s.fetch_url_color)
         rgb = QHBoxLayout(); s.r = QDoubleSpinBox(); s.g = QDoubleSpinBox(); s.b = QDoubleSpinBox(); s.al = QDoubleSpinBox()
         for sp in (s.r, s.g, s.b, s.al): sp.setRange(0, 1); sp.setSingleStep(.05); sp.setValue(1); rgb.addWidget(sp)
         form = QFormLayout(); form.addRow('Name', s.name)
-        trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse)
+        trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse); trow.addWidget(fetch)
         form.addRow('Texture', trow); form.addRow('Color R G B A', rgb)
         col.addLayout(form)
         s.texwarn = QLabel(); s.texwarn.setWordWrap(True); s.texwarn.setStyleSheet('color:#b5651d')
@@ -1184,10 +1201,13 @@ class MaterialsDialog(QDialog):
         add = QPushButton('Add / Update'); add.clicked.connect(s.save)
         rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
         btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
-        note = QLabel('Material colors show in the 3D preview. Textures and every other material setting '
-                       '(addtexture, texmat, ambient...) are kept in the file but are not drawn yet.\n'
-                       'For a texture on the internet, paste its full URL (e.g. ' + s.APPROVED + 'someone/name.png). '
-                       'The game only loads http://, so a pasted https:// link is switched to http:// automatically.')
+        note = QLabel('Material colors show in the 3D preview -- actual texture images are not drawn, so '
+                       'Load PNG fills in the color automatically from the image (if you haven\'t set one '
+                       'yourself), and Fetch Color from URL does the same for an internet texture.\n'
+                       'Every other material setting (addtexture, texmat, ambient...) is kept in the file '
+                       'but not drawn.\nFor a texture on the internet, paste its full URL (e.g. ' + s.APPROVED +
+                       'someone/name.png). The game only loads http://, so a pasted https:// link is switched '
+                       'to http:// automatically.')
         note.setWordWrap(True); col.addWidget(note)
         col.addStretch()
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
@@ -1220,7 +1240,30 @@ class MaterialsDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(s, 'Load texture', s.folder or '', 'PNG images (*.png)')
         if not path: return
         base = os.path.splitext(os.path.basename(path))[0]
-        s.tex.setText(base); s.m.texcache[s.name.text() or base] = QPixmap(path)
+        pix = QPixmap(path)
+        s.tex.setText(base); s.m.texcache[s.name.text() or base] = pix
+        if (s.r.value(), s.g.value(), s.b.value(), s.al.value()) == (1.0, 1.0, 1.0, 1.0):
+            r, g, b, a = average_color(pix.toImage())  # only fills in an untouched default color
+            s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
+
+    def fetch_url_color(s):
+        """Explicit, one-off download -- this app makes no network calls on its own, so
+        fetching an image URL only ever happens when you click this button."""
+        url = s.tex.text().strip()
+        if '://' not in url:
+            QMessageBox.information(s, 'Fetch color', 'Paste a full image URL into the Texture field first.'); return
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, headers={'User-Agent': 'BZMapMaker'})
+            data = urllib.request.urlopen(req, timeout=6).read()
+        except Exception as e:
+            QMessageBox.warning(s, 'Fetch failed', "Couldn't download that image:\n%s" % e); return
+        img = QImage()
+        if not img.loadFromData(data):
+            QMessageBox.warning(s, 'Fetch failed', "That didn't look like a valid image."); return
+        r, g, b, a = average_color(img)
+        s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
+        s.texwarn.setText('Color fields set from the downloaded image -- click Add/Update to save it.')
 
     def save(s):
         name = s.name.text().strip()
@@ -1291,7 +1334,8 @@ class Win(QMainWindow):
 
     def set_layout(s, mode):
         s.mode = mode
-        if mode == 'radar':
+        s.takeCentralWidget()  # detach without deleting -- setCentralWidget() destroys whatever
+        if mode == 'radar':     # widget it replaces unless you take it out first, which was the crash
             s.radar_widget.attach(s.ed, s.pv); s.setCentralWidget(s.radar_widget)
         else:
             s.split_widget.insertWidget(0, s.ed); s.split_widget.addWidget(s.pv)
@@ -1372,6 +1416,69 @@ class Win(QMainWindow):
             fl.addRow(fl_ + ' material', cb); s.face[fk] = cb
         d = QDockWidget('Selected object'); d.setWidget(w); s.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, d)
         s.dock = d; s.on_select()
+        s.build_text_dock()
+
+    def build_text_dock(s):
+        """A raw-text view of the map, for hand-editing or just reading what you built.
+        Tabbed with the Selected Object panel rather than making the sidebar bigger."""
+        tw = QWidget(); tl = QVBoxLayout(tw)
+        s.maptext = QPlainTextEdit(); s.maptext.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        s.maptext.setStyleSheet('font-family: monospace;')
+        tl.addWidget(s.maptext)
+        row = QHBoxLayout()
+        refresh = QPushButton('Refresh from Map'); refresh.clicked.connect(s.refresh_maptext)
+        apply_btn = QPushButton('Apply to Map'); apply_btn.clicked.connect(s.apply_maptext)
+        row.addWidget(refresh); row.addWidget(apply_btn); tl.addLayout(row)
+        s.sym_chk = QCheckBox('Apply the toolbar\'s symmetry mode to new objects'); s.sym_chk.setChecked(True)
+        tl.addWidget(s.sym_chk)
+        note = QLabel('Advanced: hand-edit or paste .bzw text, then Apply to Map -- this works the same '
+                      'as opening a file, undo works normally afterward. Refresh pulls in the latest '
+                      'changes from clicking around; it also updates on its own a moment after you edit.\n'
+                      'With the checkbox on and a symmetry mode selected in the toolbar, any object that '
+                      'is new in the text you applied gets its symmetric copies built automatically, same '
+                      'as placing it with the mouse. Editing an existing object\'s numbers, rather than '
+                      'adding a new block, is treated as a plain edit and won\'t trigger this.')
+        note.setWordWrap(True); tl.addWidget(note)
+        s.textdock = QDockWidget('Map Text (advanced)'); s.textdock.setWidget(tw)
+        s.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, s.textdock)
+        s.tabifyDockWidget(s.dock, s.textdock); s.dock.raise_()
+        s._text_pending = False
+        s.textdock.visibilityChanged.connect(lambda vis: s.refresh_maptext() if vis else None)
+        s.m.changed.connect(s.schedule_maptext_refresh)
+
+    def schedule_maptext_refresh(s):
+        if not s.textdock.isVisible() or s._text_pending: return
+        s._text_pending = True
+        QTimer.singleShot(300, s._do_maptext_refresh)
+
+    def _do_maptext_refresh(s):
+        s._text_pending = False
+        if s.textdock.isVisible(): s.refresh_maptext()
+
+    def refresh_maptext(s):
+        s.maptext.setPlainText(s.m.text())
+
+    def _sig(s, o):
+        # Identity by content, not by uid/fam (which text can't express), so this survives
+        # a full reparse: two objects with the same shape and place are "the same object".
+        return (o.t, round(o.x, 2), round(o.y, 2), round(o.z, 2), round(o.sx, 2), round(o.sy, 2),
+                round(o.sz, 2), round(o.r, 2), o.team, o.name)
+
+    def apply_maptext(s):
+        before = {s._sig(o) for o in s.m.objs}
+        try:
+            s.m.load(s.maptext.toPlainText())
+        except Exception as e:
+            QMessageBox.warning(s, 'Apply failed', str(e)); return
+        added = 0
+        if s.sym_chk.isChecked() and s.m.sym:
+            for o in list(s.m.objs):  # a plain list, so siblings appended below aren't re-processed
+                if not o.fam and s._sig(o) not in before:
+                    s.m.make_family(o); added += 1
+        s.m.changed.emit()
+        msg = 'Map text applied.'
+        if added: msg += ' Built symmetry for %d new object%s.' % (added, '' if added == 1 else 's')
+        s.statusBar().showMessage(msg, 6000)
 
     def edit(s, k, v):
         o = s.m.sel
@@ -1506,7 +1613,10 @@ class Win(QMainWindow):
         for name, mat in s.m.materials.items():
             if mat.texture:
                 p = os.path.join(folder, mat.texture + '.png')
-                if os.path.isfile(p): s.m.texcache[name] = QPixmap(p)
+                if os.path.isfile(p):
+                    pix = QPixmap(p); s.m.texcache[name] = pix
+                    if tuple(mat.color) == (1.0, 1.0, 1.0, 1.0):  # color untouched -> use the texture's own
+                        mat.color = average_color(pix.toImage())
 
     def open_file(s, path=None):
         path = path or QFileDialog.getOpenFileName(s, 'Open world', '', 'BZFlag worlds (*.bzw);;All files (*)')[0]
