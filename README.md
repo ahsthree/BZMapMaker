@@ -4,8 +4,23 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-<img width="1920" height="1051" alt="Screenshot From 2026-09-29 20-09-25" src="https://github.com/user-attachments/assets/8ce0eca8-2041-4b5d-a944-c37074e7343f" />
+<img width="1920" height="1051" alt="Screenshot From 2026-09-30 19-43-21" src="https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006" />
 
+
+<img width="1920" height="1051" alt="Screenshot From 2026-09-30 19-44-01" src="https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a" />
+
+
+## What's new
+
+- **Edit directly in 3D**, with the 2D view available either side by side or as a small radar overlay (**View** menu).
+- **A real per-pixel depth buffer** for the 3D view (built with NumPy), replacing the old approach of sorting whole shapes — overlapping objects, especially long thin ones, now always render in the correct order.
+- **Map Text panel**, tabbed with the Selected Object panel: view or hand-edit the raw `.bzw` text directly, with **Apply to Map** that can automatically build symmetry for anything new you typed, using whatever mode is active in the toolbar.
+- **Textures now show a real color** instead of plain white in the 3D view — loading a local PNG or fetching one from a URL fills in its average color automatically (the actual image still isn't drawn, just its color).
+- **Ctrl+click multi-select works in the 3D view too**, and 3D picking uses true ray depth — so an object hidden under another in the flat 2D view can be reached by orbiting to an angle where it's exposed and clicking it directly.
+- **3-, and 4-team rotational symmetry**, generalized from the original 2-team mode, plus an axis compass in the 2D view and a live-turning gizmo in the 3D view.
+- **Arcs, cones, groups (reusable prefabs), and mesh objects** are now readable, writable, and (except meshes and prefabs) fully editable.
+- Older maps' teleporter names and numeric-style links are now read correctly and upgraded to the modern format on save.
+- Recent Files list, persisted between sessions.
 
 ## Features
 
@@ -14,8 +29,9 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 - **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, and prefab groups.
 - **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte-for-byte, even though the editor itself can't reshape one.
 - **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
-- **Materials**, including separate materials per face on boxes and arcs, and a texture field that accepts a pasted image URL.
+- **Materials**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
 - **A real depth buffer** for the 3D view, so overlapping objects always render in the correct order — no more long, thin objects glitching through nearby ones.
+- **Map Text panel** for viewing or hand-editing the raw `.bzw` text, with optional automatic symmetry for anything new you type.
 - **Real files:** open, edit, and save `.bzw` worlds, including ones from other tools or from years-old maps. Undo, duplicate, snap-to-grid, recent-files list.
 - **Import Mesh Object** to pull a mesh out of another `.bzw` file and drop it into the map you're working on.
 
@@ -108,6 +124,8 @@ The 3D view is where you build. Pick a tool in the toolbar: **Select, Box, Pyram
 
 Once an object is selected, use the **Selected object** panel on the right for exact position, size, height, rotation, team, material, and (for teleporters) links. Resizing an *existing* object is done there, not by dragging a corner in 3D.
 
+**3D picking uses real depth**, not just what's drawn on top — so if something is hidden underneath another object in the flat 2D view, orbit the 3D camera to an angle where its side or top is exposed and click it directly.
+
 When you're done: **File → Save**, then run the map with BZFlag's server: `bzfs -world mymap.bzw`.
 
 ### View menu: side by side, or 3D with a 2D radar
@@ -158,9 +176,9 @@ Choose a mode from the toolbar drop-down **before** placing objects (or before d
 A few things to know:
 - **2-team and 4-team rotation always stay inside a square world**, no matter where you place the object. **3-team (120°) rotation can't make that same guarantee** — a 120° turn genuinely mixes the X and Y axes, so a copy can land outside the world if the object sits farther from the center than the world's half-width (roughly, out near a corner). The editor automatically pulls the whole set toward the center to keep everyone inside the world when this would happen, and the status bar tells you when it does. Keep new 3-team objects reasonably close to the center to avoid this.
 - **Teleporters** in a symmetric set are automatically linked to each other in a ring.
-- **Bases** swap or cycle team colors as described above.
+- **Bases** swap or cycle team colors as described above; other object types are untouched, since "team" has no meaning for them.
 - **Duplicate** (Ctrl+D) clones only the one selected object and builds it a fresh, correctly centered family if a symmetry mode is on — it doesn't try to translate a whole existing family, since that would break the symmetry.
-- Symmetry linkage is **not saved in the `.bzw` file**. After you save and reopen a map, the copies are ordinary, independent objects.
+- Symmetry linkage is **not saved in the `.bzw` file**. After you save and reopen a map, the copies are ordinary, independent objects — though see Map Text below for a way around this when hand-editing.
 
 ### Materials
 
@@ -170,17 +188,29 @@ A few things to know:
 - **Arc:** Top, Bottom, Inside, Outside, Start side, End side (matching BZFlag's own face names)
 - **Cone:** one material only, no per-face override
 
-The 3D view colors each face by its material; textures themselves aren't drawn (BZFlag texture images live in your game client or on the web, not in this editor).
+The 3D view colors each face by its material; the actual texture image isn't drawn (BZFlag texture images live in your game client or on the web, not in this editor). To avoid every textured object just showing up white, though:
+
+- **Load PNG...** picks a local image file and automatically sets the material's color to that image's average color (unless you've already set a custom color yourself).
+- **Fetch Color from URL** does the same for a texture given as a web address — this is the *only* thing in the whole app that makes a network request, and only when you click this button.
+- Opening a map that already has a texture file sitting next to it does this automatically too.
 
 **Texture field / image URLs:** paste a full image URL directly into the Texture field, for example:
 ```
 http://images.bzflag.org/astevens/concrete.png
 ```
 - A pasted `https://` link is automatically rewritten to `http://`, since that's the only scheme BZFlag actually loads.
-- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for gameplay from bzflag image hosting).
+- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for league play).
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
 Every other material setting from an imported file — `addtexture`, `texmat`, `ambient`, and so on — is preserved exactly even though this editor doesn't expose controls for it.
+
+### Map Text (advanced)
+
+Tabbed alongside the Selected Object panel — click the tab to switch to it. This shows the raw `.bzw` text of your current map, live.
+
+- **Refresh from Map** pulls in the latest state; it also updates on its own a moment after you make a change, but only while this tab is visible.
+- **Apply to Map** parses whatever's in the box and replaces the map with it — the same as opening a file, so undo still works normally afterward. This is how you hand-add an object by typing or pasting a block directly.
+- With **"Apply the toolbar's symmetry mode to new objects"** checked (on by default) and a symmetry mode active, any object that's genuinely new in the text you applied gets its symmetric copies built automatically, the same as if you'd placed it with the mouse. Editing an existing object's numbers, rather than adding a new block, is treated as a plain edit and won't trigger this — so refreshing, glancing at the text, and applying it again unchanged never duplicates anything.
 
 ### Import Mesh Object
 
@@ -199,17 +229,17 @@ Reads and writes `world`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`,
 - Group prefabs can't be edited or reshaped after creation.
 - Groups can't contain other groups.
 - Comments in the file are lost on save.
-- The 3D preview shows flat material colors, not actual textures.
+- The 3D preview shows flat material colors (real or approximated from a texture), not actual texture images.
 
 **Keep a backup of any map you didn't create in this editor** before saving over it, especially an unusually structured one.
 
 ## Notes on the 3D view
 
-The 3D view now uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order — this fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
+The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order — this fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
 
 ## Ideas for the future
 
+- Real texture rendering in the 3D view (the depth buffer already computes exact per-pixel positions, so this is a natural next step)
 - Editing mesh geometry (not just moving it)
 - Reshaping or ungrouping a saved prefab
-- Real texture rendering in the 3D view
-- Saving symmetry pairs so they survive a save/reload
+- Saving symmetry pairs so they survive a save/reload outside of Map Text
