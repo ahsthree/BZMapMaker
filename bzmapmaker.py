@@ -7,10 +7,11 @@ OpenGL is required. Textures are applied to box faces with Qt's 2D projective qu
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, math, json, hashlib
+import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
-                          QActionGroup, QKeySequence, QPixmap, QTransform)
+                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
@@ -359,6 +360,7 @@ class Model(QObject):
         s.W, s.objs, s.sel, s.msel, s.undo, s.path = 400, [], None, [], [], None
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.nid, s.sym = 1, 0
+        s.tool, s.snap = 'select', True
 
     def push(s):
         d = {'W': s.W, 'objs': [asdict(o) for o in s.objs],
@@ -581,7 +583,7 @@ HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select 
 class Editor(QWidget):
     def __init__(s, m):
         super().__init__()
-        s.m, s.tool, s.snap, s.v, s.drag, s.space, s.fitted = m, 'select', True, [0, 0, 1.0], None, False, False
+        s.m, s.v, s.drag, s.space, s.fitted = m, [0, 0, 1.0], None, False, False
         s.setFocusPolicy(Qt.FocusPolicy.StrongFocus); s.setMinimumSize(320, 240)
         m.changed.connect(s.update); m.selected.connect(s.update); m.reset.connect(s.fit)
 
@@ -591,7 +593,7 @@ class Editor(QWidget):
     def showEvent(s, e):
         if not s.fitted: s.fitted = True; s.fit()
 
-    def sn(s, v): return round(v / 5) * 5 if s.snap else v
+    def sn(s, v): return round(v / 5) * 5 if s.m.snap else v
 
     def tow(s, p):
         return (p.x() - s.width() / 2 - s.v[0]) / s.v[2], -(p.y() - s.height() / 2 - s.v[1]) / s.v[2]
@@ -717,7 +719,7 @@ class Editor(QWidget):
             s.drag = pan; return
         if b != Qt.MouseButton.LeftButton: return
         m = s.m
-        if s.tool == 'select':
+        if s.m.tool == 'select':
             o = s.hit(wx, wy)
             if ctrl and o:
                 m.toggle_msel(o); return
@@ -725,10 +727,10 @@ class Editor(QWidget):
             m.select(o)
             if o: m.push(); s.drag = ('move', o, o.x - wx, o.y - wy)
             else: s.drag = pan
-        elif s.tool in ('box', 'pyramid', 'arc', 'cone'):
+        elif s.m.tool in ('box', 'pyramid', 'arc', 'cone'):
             a = (s.sn(wx), s.sn(wy)); s.drag = ['make', a, a, p.x(), p.y()]
         else:
-            m.push(); o = m.add(s.tool, s.sn(wx), s.sn(wy)); m.make_family(o); m.select(o); m.changed.emit()
+            m.push(); o = m.add(s.m.tool, s.sn(wx), s.sn(wy)); m.make_family(o); m.select(o); m.changed.emit()
 
     def mouseMoveEvent(s, e):
         d = s.drag
@@ -736,14 +738,20 @@ class Editor(QWidget):
         p = e.position(); wx, wy = s.tow(p)
         if d[0] == 'pan': s.v[0] = d[3] + p.x() - d[1]; s.v[1] = d[4] + p.y() - d[2]; s.update()
         elif d[0] == 'move':
-            d[1].x = s.sn(wx + d[2]); d[1].y = s.sn(wy + d[3]); s.m.sync_family(d[1]); s.m.changed.emit()
+            o = d[1]
+            o.x, o.y = s.sn(wx + d[2]), s.sn(wy + d[3])
+            if s.m.sym and not o.fam:
+                # a plain object (built while symmetry was off) picks up a symmetry family the
+                # moment you actually drag it with symmetry on -- not on a mere click/select
+                s.m.make_family(o)
+            s.m.sync_family(o); s.m.changed.emit()
         else: d[2] = (s.sn(wx), s.sn(wy)); s.update()
 
     def mouseReleaseEvent(s, e):
         d = s.drag; s.drag = None
         if d and d[0] == 'make':
             (ax, ay), (bx, by) = d[1], d[2]; p = e.position()
-            s.m.push(); o = s.m.add(s.tool, ax, ay)
+            s.m.push(); o = s.m.add(s.m.tool, ax, ay)
             if math.hypot(p.x() - d[3], p.y() - d[4]) > 4 and ax != bx and ay != by:
                 o.x, o.y, o.sx, o.sy = (ax + bx) / 2, (ay + by) / 2, abs(ax - bx) / 2, abs(ay - by) / 2
             s.m.make_family(o); s.m.select(o)
@@ -764,13 +772,96 @@ class Editor(QWidget):
 # ---------------------------------------------------------------------------
 # 3D preview (software-rendered; textures via Qt's 2D projective quadToQuad)
 # ---------------------------------------------------------------------------
+def screen_ray(B, sx, sy, w, h):
+    """Inverse of Preview.proj(): turn a screen pixel back into a world-space ray
+    (origin, direction) using the same camera basis the 3D view is drawn with."""
+    pos, f, r, u = B
+    k = h * .9  # matches the k = height*.9/zc used to project points; zc cancels out of the direction
+    rx = (sx - w / 2) / k; ry = -(sy - h / 2) / k
+    d = [f[i] + rx * r[i] + ry * u[i] for i in range(3)]
+    n = math.sqrt(sum(c * c for c in d)) or 1e-9
+    return pos, [c / n for c in d]
+
+
+def ray_ground(origin, direction, z=0.0):
+    """Where a ray crosses the world's flat ground plane, or None if it never does."""
+    if abs(direction[2]) < 1e-9: return None
+    t = (z - origin[2]) / direction[2]
+    if t < 0: return None
+    return origin[0] + t * direction[0], origin[1] + t * direction[1], t
+
+
+def ray_box_hit(origin, direction, x, y, z, sx, sy, sz, r):
+    """Nearest ray/axis-rotated-box intersection distance, or None. Used to click-select
+    objects in the 3D view; the box is the same footprint x height used for 2D hit-testing."""
+    a = math.radians(-r); c, sn = math.cos(a), math.sin(a)
+    ox, oy = origin[0] - x, origin[1] - y
+    lo = (ox * c - oy * sn, ox * sn + oy * c, origin[2] - z)
+    dx, dy = direction[0], direction[1]
+    ld = (dx * c - dy * sn, dx * sn + dy * c, direction[2])
+    bmin = (-max(sx, 1), -max(sy, 1), 0); bmax = (max(sx, 1), max(sy, 1), max(sz, .3))
+    tmin, tmax = -1e18, 1e18
+    for i in range(3):
+        if abs(ld[i]) < 1e-9:
+            if lo[i] < bmin[i] or lo[i] > bmax[i]: return None
+        else:
+            t1, t2 = (bmin[i] - lo[i]) / ld[i], (bmax[i] - lo[i]) / ld[i]
+            if t1 > t2: t1, t2 = t2, t1
+            tmin, tmax = max(tmin, t1), min(tmax, t2)
+            if tmin > tmax: return None
+    return None if tmax < 0 else max(tmin, 0)
+
+
+def ray_aabb_hit(origin, direction, bmin, bmax):
+    """Same as ray_box_hit but axis-aligned, with explicit world-space bounds -- used for
+    meshes, which (unlike every other object type) aren't a simple rotated box."""
+    tmin, tmax = -1e18, 1e18
+    for i in range(3):
+        if abs(direction[i]) < 1e-9:
+            if origin[i] < bmin[i] or origin[i] > bmax[i]: return None
+        else:
+            t1, t2 = (bmin[i] - origin[i]) / direction[i], (bmax[i] - origin[i]) / direction[i]
+            if t1 > t2: t1, t2 = t2, t1
+            tmin, tmax = max(tmin, t1), min(tmax, t2)
+            if tmin > tmax: return None
+    return None if tmax < 0 else max(tmin, 0)
+
+
+def raster_triangle(zbuf, cbuf, pts, depths, rgba):
+    """Fill zbuf/cbuf in place with this triangle wherever it's the nearest thing seen so
+    far at that pixel. pts: ((x0,y0),(x1,y1),(x2,y2)) screen coords; depths: (z0,z1,z2),
+    smaller = nearer the camera. This replaces sorting whole faces back-to-front (which is
+    what let a long face's single average position misplace it relative to other objects)
+    with a genuine per-pixel depth test, so draw order stops mattering entirely.
+    """
+    h, w = zbuf.shape
+    (x0, y0), (x1, y1), (x2, y2) = pts
+    minx = max(int(math.floor(min(x0, x1, x2))), 0); maxx = min(int(math.ceil(max(x0, x1, x2))), w - 1)
+    miny = max(int(math.floor(min(y0, y1, y2))), 0); maxy = min(int(math.ceil(max(y0, y1, y2))), h - 1)
+    if minx > maxx or miny > maxy: return
+    denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+    if abs(denom) < 1e-9: return  # edge-on / degenerate triangle
+    xs, ys = np.meshgrid(np.arange(minx, maxx + 1, dtype=np.float64), np.arange(miny, maxy + 1, dtype=np.float64))
+    w0 = ((y1 - y2) * (xs - x2) + (x2 - x1) * (ys - y2)) / denom
+    w1 = ((y2 - y0) * (xs - x2) + (x0 - x2) * (ys - y2)) / denom
+    w2 = 1.0 - w0 - w1
+    inside = (w0 >= -1e-6) & (w1 >= -1e-6) & (w2 >= -1e-6)
+    if not inside.any(): return
+    depth = w0 * depths[0] + w1 * depths[1] + w2 * depths[2]
+    zslice = zbuf[miny:maxy + 1, minx:maxx + 1]
+    nearer = inside & (depth < zslice)
+    if not nearer.any(): return
+    zslice[nearer] = depth[nearer]
+    cbuf[miny:maxy + 1, minx:maxx + 1][nearer] = rgba
+
+
 class Preview(QWidget):
     LIGHT = (.4, -.5, .77)
 
     def __init__(s, m):
         super().__init__()
-        s.m, s.yaw, s.pitch, s.dist, s.last = m, .5, .55, 1100., None
-        s.setMinimumSize(320, 240)
+        s.m, s.yaw, s.pitch, s.dist, s.last, s.act, s.space = m, .5, .55, 1100., None, None, False
+        s.setMinimumSize(320, 240); s.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         m.changed.connect(s.update); m.selected.connect(s.update)
 
     def basis(s):
@@ -902,23 +993,39 @@ class Preview(QWidget):
                 pa, pb = s.proj(B, a), s.proj(B, b)
                 if pa and pb: p.drawLine(pa, pb)
             v += 50
-        pos = B[0]; L = math.sqrt(sum(x * x for x in s.LIGHT))
+        pos, f, _, _ = B; L = math.sqrt(sum(x * x for x in s.LIGHT))
 
-        def dist(face):
-            cx = [sum(v[i] for v in face[0]) / len(face[0]) - pos[i] for i in range(3)]
-            return sum(x * x for x in cx)
+        def tris(pts):  # a face is drawn as one or more planar triangles
+            return [pts] if len(pts) <= 3 else [(pts[0], pts[i], pts[i + 1]) for i in range(1, len(pts) - 1)]
 
-        for pts, col, o, tex in sorted(s.solids(), key=dist, reverse=True):
+        w_px, h_px = max(1, s.width()), max(1, s.height())
+        zbuf = np.full((h_px, w_px), np.inf); cbuf = np.zeros((h_px, w_px, 4), dtype=np.uint8)
+        sel_faces = []  # original (untriangulated) faces of the selected object, for its outline
+        for pts, col, o, tex in s.solids():
+            if o is s.m.sel: sel_faces.append(pts)
+            for tri in tris(pts):
+                screen = [s.proj(B, v) for v in tri]
+                if None in screen: continue  # a vertex behind the camera: skip, same as before
+                depths = [sum((tri[i][j] - pos[j]) * f[j] for j in range(3)) for i in range(3)]
+                u = [tri[1][j] - tri[0][j] for j in range(3)]; w_ = [tri[2][j] - tri[0][j] for j in range(3)]
+                n_ = (u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0])
+                nl = math.sqrt(sum(x * x for x in n_)) or 1
+                k = .5 + .5 * abs(sum(n_[i] * s.LIGHT[i] for i in range(3))) / (nl * L)
+                rgba = (int(col.red() * k), int(col.green() * k), int(col.blue() * k), col.alpha() or 255)
+                raster_triangle(zbuf, cbuf, [(pt.x(), pt.y()) for pt in screen], depths, rgba)
+        img = QImage(cbuf.data, w_px, h_px, w_px * 4, QImage.Format.Format_RGBA8888).copy()
+        p.drawImage(0, 0, img)
+        for pts in sel_faces:  # outline the selected object on top of the rasterized image
             pg = poly(pts)
-            if pg is None: continue
-            a, b, c = pts[:3]; u = [b[i] - a[i] for i in range(3)]; w = [c[i] - a[i] for i in range(3)]
-            n_ = (u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0])
-            nl = math.sqrt(sum(x * x for x in n_)) or 1
-            k = .5 + .5 * abs(sum(n_[i] * s.LIGHT[i] for i in range(3))) / (nl * L)
-            sh = QColor(int(col.red() * k), int(col.green() * k), int(col.blue() * k), col.alpha())
-            p.setBrush(sh); p.setPen(QPen(ACC.lighter(150), 2) if o is s.m.sel else QPen(QColor(0, 0, 0, 90), 1))
-            p.drawPolygon(pg)
-        p.setPen(QColor('#98a0a8')); p.drawText(10, s.height() - 10, 'Drag to orbit, scroll to zoom')
+            if pg: p.setPen(QPen(ACC.lighter(150), 2)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPolygon(pg)
+        for o in s.m.msel:  # small marker for Ctrl-selected objects, same idea as the 2D view's dot
+            mark = s.proj(B, (o.x, o.y, o.z + max(o.sz, .3)))
+            if mark:
+                p.setPen(QPen(QColor('#c8453b'), 2)); p.setBrush(QColor('#c8453b'))
+                p.drawEllipse(mark, 5, 5)
+        p.setPen(QColor('#98a0a8'))
+        p.drawText(10, s.height() - 10, 'Click/drag: select, move, place \u00b7 Shift+drag: rotate selected \u00b7 '
+                                        'Right/middle-drag or Space+drag: orbit \u00b7 Scroll: zoom')
         s.draw_gizmo(p, B)
 
     def draw_gizmo(s, p, B):
@@ -948,15 +1055,99 @@ class Preview(QWidget):
                 p.setPen(QColor('#ffffff'))
                 p.drawText(QRectF(ex - 8, ey - 8, 16, 16), Qt.AlignmentFlag.AlignCenter, name)
 
-    def mousePressEvent(s, e): s.last = e.position()
+    # ---- editing directly in the 3D view -------------------------------------------
+    # Left button/drag places, selects, moves and (Shift+drag) rotates objects, the same
+    # jobs the 2D view's left button does. Orbiting the camera -- the 2D view's "pan" --
+    # moves to the right or middle button, or Space+drag, so the two don't collide.
+    def sn(s, v): return round(v / 5) * 5 if s.m.snap else v
+
+    def ray(s, p):
+        return screen_ray(s.basis(), p.x(), p.y(), s.width(), s.height())
+
+    def pick(s, p):
+        """Nearest object under the screen point p, or None. Mirrors Editor.hit()."""
+        origin, direction = s.ray(p)
+        best, best_t = None, None
+        for leaf, src in expand(s.m):
+            if leaf.t == 'mesh':
+                W, _ = mesh_world(leaf)
+                if not W: continue
+                bmin = tuple(min(v[i] for v in W) for i in range(3))
+                bmax = tuple(max(v[i] for v in W) for i in range(3))
+                t = ray_aabb_hit(origin, direction, bmin, bmax)
+            else:
+                hx, hy = s.m.group_bounds(leaf.name) if leaf.t == 'group' else (leaf.sx, leaf.sy)
+                t = ray_box_hit(origin, direction, leaf.x, leaf.y, leaf.z, hx, hy, leaf.sz, leaf.r)
+            if t is not None and (best_t is None or t < best_t): best, best_t = src, t
+        return best
+
+    def mousePressEvent(s, e):
+        s.setFocus(); b = e.button(); p = e.position()
+        if b in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton) or s.space:
+            s.last = p; s.act = None; return
+        if b != Qt.MouseButton.LeftButton: return
+        m = s.m
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier and m.sel:
+            s.act = ('rotate', m.sel, m.sel.r, p.x()); m.push(); return
+        if m.tool == 'select':
+            ctrl = e.modifiers() & Qt.KeyboardModifier.ControlModifier
+            o = s.pick(p)
+            if ctrl and o:
+                m.toggle_msel(o); s.act = None; return
+            if not ctrl: m.msel = []
+            m.select(o)
+            if o: m.push(); s.act = ('move', o, o.z)
+            else: s.act = None
+        elif m.tool in ('box', 'pyramid', 'arc', 'cone'):
+            hit = ray_ground(*s.ray(p))
+            if hit:
+                a = (s.sn(hit[0]), s.sn(hit[1])); s.act = ('make', a, a, p)
+        else:
+            hit = ray_ground(*s.ray(p))
+            if hit:
+                m.push(); o = m.add(m.tool, s.sn(hit[0]), s.sn(hit[1])); m.make_family(o); m.select(o); m.changed.emit()
+            s.act = None
 
     def mouseMoveEvent(s, e):
-        if s.last is None: return
-        p = e.position(); s.yaw -= (p.x() - s.last.x()) * .008
-        s.pitch = min(1.5, max(.05, s.pitch + (p.y() - s.last.y()) * .008)); s.last = p; s.update()
+        p = e.position()
+        if s.last is not None:  # orbiting
+            s.yaw -= (p.x() - s.last.x()) * .008
+            s.pitch = min(1.5, max(.05, s.pitch + (p.y() - s.last.y()) * .008)); s.last = p; s.update(); return
+        a = getattr(s, 'act', None)
+        if not a: return
+        m = s.m
+        if a[0] == 'move':
+            _, o, z0 = a
+            hit = ray_ground(*s.ray(p), z0)  # ray recomputed from the current mouse position each move
+            if hit:
+                o.x, o.y = s.sn(hit[0]), s.sn(hit[1])
+                if m.sym and not o.fam: m.make_family(o)  # see Editor.mouseMoveEvent for why this is here
+                m.sync_family(o); m.changed.emit()
+        elif a[0] == 'rotate':
+            _, o, r0, x0 = a
+            o.r = (r0 + (p.x() - x0) * .5) % 360
+            m.sync_family(o); m.changed.emit()
+        elif a[0] == 'make':
+            hit = ray_ground(*s.ray(p))
+            if hit: s.act = (a[0], a[1], (s.sn(hit[0]), s.sn(hit[1])), a[3]); s.update()
+
+    def mouseReleaseEvent(s, e):
+        a = getattr(s, 'act', None); s.act = None; s.last = None
+        if not a or a[0] != 'make': return
+        (ax, ay), (bx, by), p0 = a[1], a[2], a[3]
+        m = s.m; m.push(); o = m.add(m.tool, ax, ay)
+        if math.hypot(e.position().x() - p0.x(), e.position().y() - p0.y()) > 4 and ax != bx and ay != by:
+            o.x, o.y, o.sx, o.sy = (ax + bx) / 2, (ay + by) / 2, abs(ax - bx) / 2, abs(ay - by) / 2
+        m.make_family(o); m.select(o); m.changed.emit()
 
     def wheelEvent(s, e):
         s.dist = min(8000, max(40, s.dist * (.9 if e.angleDelta().y() > 0 else 1 / .9))); s.update()
+
+    def keyPressEvent(s, e):
+        if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat(): s.space = True
+
+    def keyReleaseEvent(s, e):
+        if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat(): s.space = False
 
 
 def _qpath(poly):
@@ -1052,6 +1243,34 @@ class MaterialsDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
+class RadarHost(QWidget):
+    """3D view fills the window; the 2D view sits on top as a small fixed, non-interactive
+    minimap in a corner -- purely for orientation, since all editing happens in the 3D view."""
+    CORNERS = {'tl': (True, True), 'tr': (False, True), 'bl': (True, False), 'br': (False, False)}
+
+    def __init__(s):
+        super().__init__(); s.ed = s.pv = None; s.corner = 'tl'; s.radar_size = 260
+
+    def attach(s, ed, pv):
+        s.ed, s.pv = ed, pv
+        pv.setParent(s); ed.setParent(s)
+        ed.setStyleSheet('border: 2px solid #666d74; background: #e9e7e0;')
+        ed.raise_(); s.do_layout()
+
+    def resizeEvent(s, e): s.do_layout()
+
+    def do_layout(s):
+        if not s.pv: return
+        s.pv.setGeometry(0, 0, s.width(), s.height())
+        left, top = s.CORNERS[s.corner]; m, sz = 10, s.radar_size
+        x = m if left else max(m, s.width() - sz - m)
+        y = m if top else max(m, s.height() - sz - m)
+        s.ed.setGeometry(x, y, min(sz, s.width() - 2 * m), min(sz, s.height() - 2 * m)); s.ed.raise_()
+
+    def set_corner(s, c):
+        s.corner = c; s.do_layout()
+
+
 class Win(QMainWindow):
     FIELDS = (('x', 'X'), ('y', 'Y'), ('z', 'Z'), ('sx', 'Half-width X'), ('sy', 'Half-width Y'),
               ('sz', 'Height'), ('r', 'Rotation'))
@@ -1059,14 +1278,30 @@ class Win(QMainWindow):
     def __init__(s, path=None):
         super().__init__(); s.m = Model(); s.resize(1340, 800)
         s.ed, s.pv = Editor(s.m), Preview(s.m)
-        sp = QSplitter(); sp.addWidget(s.ed); sp.addWidget(s.pv); sp.setSizes([670, 670]); s.setCentralWidget(sp)
+        s.split_widget = QSplitter(); s.radar_widget = RadarHost()
         s.settings = QSettings('BZMapMaker', 'BZMapMaker')
         s.recent = [p for p in s.settings.value('recentFiles', []) or [] if isinstance(p, str)]
         s.busy = s.pushed = False; s.build_menus(); s.build_panel(); s.statusBar()
         s.m.selected.connect(s.on_select); s.m.changed.connect(s.refresh)
         s.m.warn.connect(lambda msg: s.statusBar().showMessage(msg, 8000))
+        s.radar_widget.set_corner(s.settings.value('radarCorner', 'tl'))
+        s.set_layout(s.settings.value('layoutMode', 'split'))
         if path: s.open_file(path)
         s.title()
+
+    def set_layout(s, mode):
+        s.mode = mode
+        if mode == 'radar':
+            s.radar_widget.attach(s.ed, s.pv); s.setCentralWidget(s.radar_widget)
+        else:
+            s.split_widget.insertWidget(0, s.ed); s.split_widget.addWidget(s.pv)
+            s.split_widget.setSizes([670, 670]); s.ed.setStyleSheet('')
+            s.setCentralWidget(s.split_widget)
+        s.settings.setValue('layoutMode', mode)
+        s.ed.fit()  # the whole map should stay visible, whether it's a half-window pane or a small radar
+
+    def set_corner(s, corner):
+        s.radar_widget.set_corner(corner); s.settings.setValue('radarCorner', corner)
 
     def act(s, menu, label, fn, key=None):
         a = QAction(label, s); a.triggered.connect(fn)
@@ -1085,12 +1320,23 @@ class Win(QMainWindow):
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
+        vw = s.menuBar().addMenu('&View')
+        lg = QActionGroup(s); cur_mode = s.settings.value('layoutMode', 'split')
+        split_a = QAction('Side by Side', s); split_a.setCheckable(True); split_a.setChecked(cur_mode != 'radar')
+        split_a.triggered.connect(lambda: s.set_layout('split')); lg.addAction(split_a); vw.addAction(split_a)
+        radar_a = QAction('3D View with 2D Radar', s); radar_a.setCheckable(True); radar_a.setChecked(cur_mode == 'radar')
+        radar_a.triggered.connect(lambda: s.set_layout('radar')); lg.addAction(radar_a); vw.addAction(radar_a)
+        vw.addSeparator()
+        cm = vw.addMenu('Radar Position'); cg = QActionGroup(s); cur_corner = s.settings.value('radarCorner', 'tl')
+        for key, label in (('tl', 'Top Left'), ('tr', 'Top Right'), ('bl', 'Bottom Left'), ('br', 'Bottom Right')):
+            ca = QAction(label, s); ca.setCheckable(True); ca.setChecked(key == cur_corner)
+            ca.triggered.connect(lambda _, k=key: s.set_corner(k)); cg.addAction(ca); cm.addAction(ca)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
         for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
-            a.triggered.connect(lambda _, t=t: setattr(s.ed, 'tool', t)); g.addAction(a); tb.addAction(a)
+            a.triggered.connect(lambda _, t=t: setattr(s.m, 'tool', t)); g.addAction(a); tb.addAction(a)
         tb.addSeparator(); sn = QAction('Snap to 5', s); sn.setCheckable(True); sn.setChecked(True)
-        sn.toggled.connect(lambda v: setattr(s.ed, 'snap', v)); tb.addAction(sn)
+        sn.toggled.connect(lambda v: setattr(s.m, 'snap', v)); tb.addAction(sn)
         tb.addSeparator(); sy = QComboBox(); sy.addItems(SYM_LABELS)
         sy.setToolTip('New objects (and duplicates) get siblings that follow every edit.\n'
                       '120\u00b0 (3-team) symmetry can push a sibling outside a square world if the\n'
