@@ -1,10 +1,6 @@
-# BZMapMaker
-BZFlag .bzw map editor for Windows, macOS, Linux and Chromebook. 2D layout, live 3D preview, teleporter links and symmetry tools for balanced CTF maps
-#####
-
 # BZ Map Maker
 
-A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by the classic BZEdit. It edits `.bzw` world files with a top-down layout view and a live 3D preview, and it can build symmetrical (balanced) capture-the-flag maps for you.
+A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by the classic BZEdit. It edits `.bzw` world files, lets you build and edit directly in a live 3D view, and can build symmetrical (balanced) capture-the-flag maps for you automatically.
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
@@ -12,17 +8,19 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 ## Features
 
-- **Two views side by side.** Left: a top-down layout editor. Right: a 3D preview you can orbit and zoom, updated as you edit.
-- **Objects:** boxes, pyramids, team bases (red, green, blue, purple) and teleporters.
-- **Teleporter links:** front and back faces can each link to another teleporter. Names are kept unique automatically.
-- **Symmetry modes:** place an object once and its mirrored twin is created and kept in sync (see [Symmetry modes](#symmetry-modes)).
-- **Exact editing:** a properties panel for position, size, height and rotation.
-- **Real files:** open, edit and save `.bzw` worlds. Undo, duplicate, snap to grid.
-- **Light on dependencies:** only Python and PyQt6. The 3D preview is drawn in software, so no OpenGL is required.
+- **Edit directly in 3D.** Click to select, drag to move, Shift+drag to rotate, drag to place and size new objects — all in the same 3D view you use to look at your map. Orbit with the right or middle mouse button (or Space+drag), and zoom with the scroll wheel.
+- **2D layout view**, either side by side with the 3D view or as a small fixed radar overlay in a corner of your choice.
+- **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, and prefab groups.
+- **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte-for-byte, even though the editor itself can't reshape one.
+- **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
+- **Materials**, including separate materials per face on boxes and arcs, and a texture field that accepts a pasted image URL.
+- **A real depth buffer** for the 3D view, so overlapping objects always render in the correct order — no more long, thin objects glitching through nearby ones.
+- **Real files:** open, edit, and save `.bzw` worlds, including ones from other tools or from years-old maps. Undo, duplicate, snap-to-grid, recent-files list.
+- **Import Mesh Object** to pull a mesh out of another `.bzw` file and drop it into the map you're working on.
 
 ## Installation
 
-You need **Python 3.9 or newer** and **PyQt6**. Then download `bzmapmaker.py` (or clone this repository) and run it.
+You need **Python 3.9 or newer**, **PyQt6**, and **NumPy** (NumPy powers the 3D view's depth buffer — it's a very common, lightweight math library, not a graphics driver; nothing here needs a GPU or OpenGL). Then download `bzmapmaker.py` (or clone this repository) and run it.
 
 ```
 python bzmapmaker.py                # start with a blank map
@@ -35,13 +33,13 @@ python bzmapmaker.py mymap.bzw      # open an existing map
 2. Open the **Terminal** app and run:
    ```
    sudo apt update
-   sudo apt install python3-pyqt6
+   sudo apt install python3-pyqt6 python3-numpy
    ```
 3. Go to the folder with the script and run `python3 bzmapmaker.py`.
 
-Use the `apt` package rather than `pip` here. On Chromebooks (which may be ARM), pip can leave a half-installed PyQt6 that fails with `No module named 'PyQt6.QtCore'`. If you already tried pip, remove it first:
+Use the `apt` packages rather than `pip` here. On Chromebooks (which may be ARM), pip can leave a half-installed PyQt6 that fails with `No module named 'PyQt6.QtCore'`. If you already tried pip, remove it first:
 ```
-pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip
+pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip numpy
 ```
 
 ### Windows
@@ -49,7 +47,7 @@ pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip
 1. Install Python from [python.org](https://www.python.org/downloads/). On the first installer screen, tick **Add python.exe to PATH**.
 2. Open **Command Prompt** or **PowerShell** and run:
    ```
-   py -m pip install PyQt6
+   py -m pip install PyQt6 numpy
    py bzmapmaker.py
    ```
 
@@ -58,23 +56,23 @@ pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip
 1. Install Python 3 from [python.org](https://www.python.org/downloads/) or with Homebrew (`brew install python`).
 2. In Terminal:
    ```
-   python3 -m pip install PyQt6
+   python3 -m pip install PyQt6 numpy
    python3 bzmapmaker.py
    ```
 
 ### Linux (Debian, Ubuntu and derivatives)
 
 ```
-sudo apt install python3-pyqt6
+sudo apt install python3-pyqt6 python3-numpy
 python3 bzmapmaker.py
 ```
 
-Other distributions: `sudo dnf install python3-pyqt6` (Fedora) or `sudo pacman -S python-pyqt6` (Arch).
+Other distributions: `sudo dnf install python3-pyqt6 python3-numpy` (Fedora) or `sudo pacman -S python-pyqt6 python-numpy` (Arch).
 
 If you prefer pip, use a virtual environment (newer distributions refuse system-wide pip installs):
 ```
 python3 -m venv venv && source venv/bin/activate
-pip install PyQt6
+pip install PyQt6 numpy
 python bzmapmaker.py
 ```
 If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-cursor0 libgl1`.
@@ -84,7 +82,8 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 | Message | Fix |
 |---|---|
 | `No module named 'PyQt6.QtCore'` | Broken pip install. Uninstall it (see Chromebook above) and use your system package. |
-| `externally-managed-environment` | Use the `apt` package or a virtual environment. |
+| `No module named 'numpy'` | Install it the same way you installed PyQt6 (`pip install numpy` or `apt install python3-numpy`). |
+| `externally-managed-environment` | Use the `apt`/`dnf`/`pacman` package, or a virtual environment. |
 | `Could not load the Qt platform plugin "xcb"` | `sudo apt install libxcb-cursor0` |
 | `python` not found on Windows | Use `py` instead, or reinstall Python with "Add to PATH" ticked. |
 
@@ -92,90 +91,124 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building a map
 
-1. Pick a tool in the toolbar: **Select, Box, Pyramid, Base** or **Teleporter**.
-2. **Box / Pyramid:** drag from one corner to the opposite corner, or just click for a default size.
-3. **Base / Teleporter:** click to place one, then adjust it in the properties panel.
-4. Switch to **Select**, click an object, and drag it to move it or edit exact values in the **Selected object** panel.
-5. **File → Save** and run the map with BZFlag's server: `bzfs -world mymap.bzw`.
+The 3D view is where you build. Pick a tool in the toolbar: **Select, Box, Pyramid, Base, Teleporter, Arc,** or **Cone**.
 
-### Controls
+| Action | In the 3D view | In the 2D view |
+|---|---|---|
+| Select an object | Click it | Click it |
+| Add to the selection (for grouping) | Ctrl+click | Ctrl+click |
+| Move the selected object | Drag it | Drag it |
+| Rotate the selected object | Shift+drag | Edit "Rotation" in the panel |
+| Place a Box/Pyramid/Arc/Cone | Drag corner to corner, or click for a default size | Drag corner to corner, or click for a default size |
+| Place a Base/Teleporter | Click | Click |
+| Orbit the camera | Right or middle mouse button, or Space+drag | — |
+| Pan the view | — | Drag empty space, or right/middle mouse button, or Space+drag |
+| Zoom | Scroll wheel | Scroll wheel |
 
-| Action | How |
-|---|---|
-| Pan the layout view | Drag empty space with Select, or right/middle mouse drag, or hold Space and drag |
-| Zoom | Mouse wheel |
-| Orbit the 3D preview | Drag |
-| Zoom the 3D preview | Mouse wheel |
-| New / Open / Save / Save As | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
-| Undo | Ctrl+Z |
-| Duplicate | Ctrl+D |
-| Delete | Delete |
-| Fit the map to the window | Ctrl+0 |
+Once an object is selected, use the **Selected object** panel on the right for exact position, size, height, rotation, team, material, and (for teleporters) links. Resizing an *existing* object is done there, not by dragging a corner in 3D.
+
+When you're done: **File → Save**, then run the map with BZFlag's server: `bzfs -world mymap.bzw`.
+
+### View menu: side by side, or 3D with a 2D radar
+
+- **Side by Side** (the default) shows the 2D and 3D views next to each other.
+- **3D View with 2D Radar** fills the window with the 3D view and shows a small, fixed, non-interactive 2D minimap in one corner, for orientation while you edit entirely in 3D.
+- **Radar Position** sets which corner (top-left, top-right, bottom-left, bottom-right).
+
+Your choice is remembered the next time you open the app.
+
+### The axis compass and gizmo
+
+Both views show which way is which. The 2D view has a small fixed compass (+X/−X/+Y/−Y) in the top-left corner, since that view never rotates. The 3D view has a small circular gizmo, also top-left, that turns live as you orbit — a solid colored dot with its letter marks the positive end of each axis (X, Y, Z), a hollow dot marks the negative end.
 
 ### World size
 
-The **World size** box follows the BZFlag convention: it is the distance from the center to each edge. `size 400` gives a world that runs from -400 to 400 on both axes (800 wide). The center is always 0, 0.
+The **World size** box follows the BZFlag convention: it's the distance from the center to each edge. `size 400` gives a world that runs from −400 to 400 on both axes (800 wide). The center is always 0, 0.
 
 ### Object sizes
 
-`Half-width X` and `Half-width Y` are half the object's extent, as in `.bzw` files. A box with `size 10 10 9.4` is 20 by 20 on the ground. `Height` is the full height. Rotation is in degrees, counter-clockwise.
+`Half-width X` and `Half-width Y` are half the object's extent, as in `.bzw` files. A box with `size 10 10 9.4` is 20 by 20 on the ground. `Height` is the full height. Rotation is in degrees.
 
 ### Teleporters
 
-Each teleporter has a unique name (`t1`, `t2`, ...) and two link settings:
+Each teleporter has a unique name and two link settings, **Front links to** and **Back links to**, written as `link` blocks. Opening an older map that names a teleporter on its own line (`teleporter home`) or links by plain number (`from 0` / `to 1`) instead of by name still works — those names and links are read correctly, and saving rewrites them in the modern, named style automatically.
 
-- **Front links to:** where you come out after entering this teleporter's front.
-- **Back links to:** where you come out after entering its back.
+### Arcs and cones
 
-They are written as `link` blocks (`from t1:f to t2:b` and so on). Choose "Nothing" to leave a face unlinked.
+Arcs have a **Sweep angle** (360° is a full circle) and a **Hollow ratio** (0 is solid, closer to 1 is a thin ring) plus **Divisions** for how many segments make up the curve. Cones just have **Divisions**. Both can have a single all-faces material, or (arcs only) separate materials per face — see Materials below.
 
-## Symmetry modes
+### Groups
 
-Choose a mode from the toolbar drop-down **before** placing objects. With a mode on, every new object gets a **twin** at the mirrored position. The twin stays linked to the original: moving, resizing, rotating, changing the height or deleting one does the same to the other. Select an object and its twin is outlined with a dotted line.
+Select two or more objects (Ctrl+click each one), then **Edit → Group Selected** (Ctrl+G). This saves their layout as a reusable prefab (a `define` block, positioned relative to their combined center) and replaces them with a single **group** instance you can move and rotate as a whole. A group can optionally override the team color of every base inside it — set this in the panel's **Group team override** field. Groups currently can't be edited back into their individual pieces or reshaped after creation; delete the instances and edit the file by hand if you need to change a prefab.
 
-Mirroring is around the center of the world (0, 0). For an object at position `(200, 200)`:
+### Symmetry modes
 
-| Mode | Twin position | Twin rotation | Twin at (200, 200) |
-|---|---|---|---|
-| **Off** | none | none | none |
-| **Rotate 180°** | `(-x, -y)` | rotation + 180° | (-200, -200) |
-| **Mirror left-right** | `(-x, y)` | 180° − rotation | (-200, 200) |
-| **Mirror top-bottom** | `(x, -y)` | −rotation | (200, -200) |
+Choose a mode from the toolbar drop-down **before** placing objects (or before dragging an object that doesn't have one yet — dragging it while a mode is active gives it a fresh, correctly centered copy). Every new object gets one or more **siblings** that stay linked: moving, resizing, rotating, or deleting one does the same to the others. The currently selected object's siblings are outlined with a dotted line.
 
-- **Rotate 180°** (point symmetry) suits maps where both teams play the same layout from opposite corners. Turn the whole map around the center and it looks identical.
-- **Mirror left-right** flips the map across the vertical center line, so the east half mirrors the west half.
-- **Mirror top-bottom** flips the map across the horizontal center line, so the north half mirrors the south half.
+| Mode | Copies | How they're placed |
+|---|---|---|
+| Off | none | — |
+| 2-team rotation (180°) | 2 | Opposite the center; bases swap red↔green or blue↔purple |
+| 3-team rotation (120°) | 3 | Spaced evenly around the center; bases cycle through the four team colors |
+| 4-team rotation (90°) | 4 | Spaced evenly around the center; bases cycle through the four team colors |
+| Mirror left-right | 2 | Flipped across the vertical center line |
+| Mirror top-bottom | 2 | Flipped across the horizontal center line |
 
-Extra rules that keep the map fair:
+A few things to know:
+- **2-team and 4-team rotation always stay inside a square world**, no matter where you place the object. **3-team (120°) rotation can't make that same guarantee** — a 120° turn genuinely mixes the X and Y axes, so a copy can land outside the world if the object sits farther from the center than the world's half-width (roughly, out near a corner). The editor automatically pulls the whole set toward the center to keep everyone inside the world when this would happen, and the status bar tells you when it does. Keep new 3-team objects reasonably close to the center to avoid this.
+- **Teleporters** in a symmetric set are automatically linked to each other in a ring.
+- **Bases** swap or cycle team colors as described above.
+- **Duplicate** (Ctrl+D) clones only the one selected object and builds it a fresh, correctly centered family if a symmetry mode is on — it doesn't try to translate a whole existing family, since that would break the symmetry.
+- Symmetry linkage is **not saved in the `.bzw` file**. After you save and reopen a map, the copies are ordinary, independent objects.
 
-- **Bases swap teams.** A base's twin belongs to the opposing team: red ↔ green and blue ↔ purple. Changing a base's team also changes its twin's.
-- **Teleporters** get a twin turned 180° from the original, so front and back line up, and the pair is linked to each other on both faces.
-- **Objects on the axis** have no twin. In Rotate 180° that means an object exactly at 0, 0. In left-right mode it means x = 0, and in top-bottom mode y = 0. Their twin would sit on top of themselves.
-- **Duplicate** (Ctrl+D) also creates a twin when a mode is on.
-- **Each pair remembers its mode.** Changing the drop-down affects new objects only.
-- Turn the mode to **Off** to edit one object on its own. Twins created earlier still follow it, so delete the pair or undo if you want them separate.
+### Materials
 
-Twin pairing is not stored in the `.bzw` file. After you save and reopen a map, both halves are ordinary objects and no longer move together.
+**Objects → Materials...** opens a list of named materials (color, and optionally a texture reference). Assign a material to a box, pyramid, arc, or cone in the **Material (all faces)** field, or, for boxes and arcs, override individual faces:
+
+- **Box:** Top, Sides, Bottom
+- **Arc:** Top, Bottom, Inside, Outside, Start side, End side (matching BZFlag's own face names)
+- **Cone:** one material only, no per-face override
+
+The 3D view colors each face by its material; textures themselves aren't drawn (BZFlag texture images live in your game client or on the web, not in this editor).
+
+**Texture field / image URLs:** paste a full image URL directly into the Texture field, for example:
+```
+http://images.bzflag.org/astevens/concrete.png
+```
+- A pasted `https://` link is automatically rewritten to `http://`, since that's the only scheme BZFlag actually loads.
+- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for league play).
+- A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
+
+Every other material setting from an imported file — `addtexture`, `texmat`, `ambient`, and so on — is preserved exactly even though this editor doesn't expose controls for it.
+
+### Import Mesh Object
+
+**Objects → Import Mesh Object...** opens a file picker for any `.bzw`. It pulls out just the `mesh ... end` blocks from that file (other object types in it are skipped) and adds them to your current map at the origin, along with any materials those meshes refer to. Handy for keeping a "parts bin" file of your favorite mesh props.
+
+### Recent files
+
+**File → Open Recent** keeps your last 12 opened or saved files, most recent first, and remembers them the next time you start the app. Files that have been moved or deleted are quietly dropped from the list.
 
 ## Supported `.bzw` content
 
-Reads and writes `world` (size), `box`, `pyramid`, `base` (with `color`) and `teleporter` (with `name`) blocks, plus `link` blocks. Positions, sizes and rotations are preserved.
+Reads and writes `world`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`, `mesh`, `material`, `define`/`group`, and `link` blocks, plus per-face `matref` on boxes and arcs. Any block type this editor doesn't specifically handle (walls, physics drivers, dynamic colors, zones, texture matrices...) is preserved exactly as written and saved back unchanged — it just isn't drawn or editable here.
 
-**Not supported yet.** These are skipped when opening a file, so they will be missing from anything you save:
-- Walls, meshes, materials, textures, physics zones and other block types
-- Groups: boxes inside a `group` load without the group's transform
-- Link targets always use the opposite face (`t1:f` → `t2:b`), so front-to-front links become front-to-back
+**Known limits:**
+- Meshes can be moved but not reshaped, rotated, or scaled here.
+- Group prefabs can't be edited or reshaped after creation.
+- Groups can't contain other groups.
+- Comments in the file are lost on save.
+- The 3D preview shows flat material colors, not actual textures.
 
-**Keep a backup of any map you did not create in this editor** before saving over it.
+**Keep a backup of any map you didn't create in this editor** before saving over it, especially an unusually structured one.
 
-## Notes
+## Notes on the 3D view
 
-- The 3D preview is a simple software renderer without textures or lighting like the game. Overlapping objects can occasionally be drawn in the wrong order.
-- Tested on Linux on a Chromebook. The Windows and macOS steps use the standard PyQt6 install and are less tested.
+The 3D view now uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order — this fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
 
 ## Ideas for the future
 
-- Wall blocks and other `.bzw` features
-- Saving symmetry pairs
-- Textures and materials in the preview
-- A first-person walk-through view
+- Editing mesh geometry (not just moving it)
+- Reshaping or ungrouping a saved prefab
+- Real texture rendering in the 3D view
+- Saving symmetry pairs so they survive a save/reload
