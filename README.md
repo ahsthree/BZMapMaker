@@ -4,7 +4,8 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-<!-- Add a screenshot here: ![BZ Map Maker](docs/screenshot.png) -->
+<img width="1920" height="1051" alt="Screenshot From 2026-09-29 20-09-25" src="https://github.com/user-attachments/assets/8ce0eca8-2041-4b5d-a944-c37074e7343f" />
+
 
 ## Features
 
