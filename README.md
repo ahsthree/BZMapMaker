@@ -177,7 +177,7 @@ The 3D view colors each face by its material; textures themselves aren't drawn (
 http://images.bzflag.org/astevens/concrete.png
 ```
 - A pasted `https://` link is automatically rewritten to `http://`, since that's the only scheme BZFlag actually loads.
-- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for league play).
+- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for gameplay from bzflag image hosting).
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
 Every other material setting from an imported file — `addtexture`, `texmat`, `ambient`, and so on — is preserved exactly even though this editor doesn't expose controls for it.
