@@ -29,7 +29,7 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 - **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, and prefab groups.
 - **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte-for-byte, even though the editor itself can't reshape one.
 - **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
-- **Materials**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
+- **s**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
 - **A real depth buffer** for the 3D view, so overlapping objects always render in the correct order — no more long, thin objects glitching through nearby ones.
 - **Map Text panel** for viewing or hand-editing the raw `.bzw` text, with optional automatic symmetry for anything new you type.
 - **Real files:** open, edit, and save `.bzw` worlds, including ones from other tools or from years-old maps. Undo, duplicate, snap-to-grid, recent-files list.
@@ -199,7 +199,7 @@ The 3D view colors each face by its material; the actual texture image isn't dra
 http://images.bzflag.org/astevens/concrete.png
 ```
 - A pasted `https://` link is automatically rewritten to `http://`, since that's the only scheme BZFlag actually loads.
-- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved for league play).
+- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved download by default clients).
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
 Every other material setting from an imported file — `addtexture`, `texmat`, `ambient`, and so on — is preserved exactly even though this editor doesn't expose controls for it.
