@@ -21,11 +21,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDoc
 # Data model
 # ---------------------------------------------------------------------------
 DEF = {'box': (10, 10, 9.4), 'pyramid': (8.2, 8.2, 8.2), 'base': (20, 20, 0),
-       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0)}
+       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0), 'zone': (10, 10, 1)}
 TEAM = ['', '#c8453b', '#3c9a5a', '#3a6fc4', '#8a55b5']
 TEAM_NAMES = ['', 'Red', 'Green', 'Blue', 'Purple']
 COL = {'box': '#8d939a', 'pyramid': '#b08a4e', 'teleporter': '#d0702a', 'arc': '#5c8a7a',
-       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8'}
+       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8', 'zone': '#6b7280'}
 TSWAP = {1: 2, 2: 1, 3: 4, 4: 3}  # fixed pairing used by 2-fold symmetry: red<->green, blue<->purple
 # index -> (mode, fold). mode 'rot' = N-way rotation about the world center; the two mirror
 # modes are always a simple left-right or top-bottom reflection (fold is always 2 for those).
@@ -36,6 +36,16 @@ SYM_LABELS = ['Symmetry: off', 'Symmetry: 2-team rotation (180\u00b0)', 'Symmetr
 FACES = {'box': [('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom')],
          'arc': [('top', 'Top'), ('bottom', 'Bottom'), ('inside', 'Inside'), ('outside', 'Outside'),
                  ('startside', 'Start side'), ('endside', 'End side')]}
+ZONE_TEAM_COLORS = ['#1b1b1b', '#c8453b', '#3c9a5a', '#3a6fc4', '#8a55b5']  # 0=rogue(black)..4=purple
+
+
+def zone_colors(o):
+    """Colors a zone should show: one color per spawning team, or a single neutral gray if
+    no team is set (e.g. a zone that only exists to drop flags in, not to spawn players)."""
+    teams = sorted(set(t for t in o.zteam if 0 <= t <= 4))
+    return [ZONE_TEAM_COLORS[t] for t in teams] if teams else [COL['zone']]
+
+
 ACC = QColor('#0f6b6b')
 
 
@@ -48,6 +58,11 @@ class Obj:
     matref: str = ''
     mats: dict = field(default_factory=dict)  # per-face materials (box, arc): face key -> material name
     mesh: str = ''  # key into MESHDATA: the mesh block's original text, kept verbatim
+    flipz: bool = False  # pyramid only: point down instead of up
+    phys: str = 'normal'  # box/pyramid/arc/cone: 'normal', 'drivethrough', 'shootthrough', 'passable'
+    zteam: list = field(default_factory=list)   # zone only: which teams may spawn here (0=rogue..4=purple)
+    zsafety: list = field(default_factory=list) # zone only: team flags (1-4) that fly here when dropped
+    zflags: str = ''  # zone only: raw 'flag X' / 'zoneflag X N' lines, one per line, written verbatim
     divisions: int = 16; angle: float = 360.0; ratio: float = 0.0  # arc / cone only
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
@@ -179,7 +194,7 @@ def parse(text):
     lines = [ln.split('#', 1)[0].rstrip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln.strip()]
     i = 0
-    nw, objs, materials, defines, links, extras = None, [], {}, {}, [], []
+    nw, objs, materials, defines, links, extras, options_text = None, [], {}, {}, [], [], ''
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
            'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
@@ -233,10 +248,44 @@ def parse(text):
                 else: extra.append(ln)
             name = name or (p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1))
             materials[name] = Material(name, tex, color, extra, list(body))
+        elif k == 'options':
+            if not options_text: options_text = '\n'.join(read_raw_block())  # only once per map
+            else: read_raw_block()
         elif k == 'mesh':
             body = read_raw_block()
             name = next((b.split()[1] for b in body if b.lower().startswith('name ') and len(b.split()) > 1), '')
             o = Obj('mesh', 0, 0, 0, 0, 0, 0, 0, 1, name); o.mesh = mesh_register(body); objs.append(o)
+        elif k == 'zone':
+            body = read_raw_block()
+            name = ''; zflags = []; zteam = []; zsafety = []
+            zx = zy = zz = 0.0; zsx, zsy, zsz = DEF['zone']; zr = 0.0
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: name = q[1]
+                elif kk in ('position', 'pos'):
+                    try: zx, zy, zz = (float(a) for a in q[1:4])
+                    except Exception: pass
+                elif kk == 'size':
+                    try: zsx, zsy, zsz = (float(a) for a in q[1:4])
+                    except Exception: pass
+                elif kk in ('rotation', 'rot'):
+                    try: zr = float(q[1])
+                    except Exception: pass
+                elif kk in ('flag', 'zoneflag'):
+                    zflags.append(ln)
+                elif kk == 'team':
+                    for a in q[1:]:
+                        try: zteam.append(int(a))
+                        except ValueError: pass
+                elif kk == 'safety':
+                    for a in q[1:]:
+                        try: zsafety.append(int(a))
+                        except ValueError: pass
+            zo = Obj('zone', zx, zy, zz, zsx, zsy, zsz, zr, 1, name)
+            zo.zflags = '\n'.join(zflags); zo.zteam = zteam; zo.zsafety = zsafety
+            objs.append(zo)
         elif k == 'link':
             v = read_block(); links.append(((v.get('from') or [''])[0], (v.get('to') or [''])[0]))
         elif k == 'define':
@@ -245,7 +294,7 @@ def parse(text):
             while i < len(lines):
                 if lines[i].split()[0].lower() == 'enddef': i += 1; break
                 sub.append(lines[i]); i += 1
-            _, kids, _, _, _ = parse('\n'.join(sub))
+            _, kids, _, _, _, _ = parse('\n'.join(sub))
             defines[name] = kids
         elif k == 'group':
             v = read_block()
@@ -274,6 +323,9 @@ def parse(text):
                 o.ratio = nm(v.get('ratio'), (0,))[0]
             if k == 'cone':
                 o.divisions = int(nm(v.get('divisions'), (16,))[0])
+            if k == 'pyramid': o.flipz = 'flipz' in v
+            hd, hs, hp = 'drivethrough' in v, 'shootthrough' in v, 'passable' in v
+            o.phys = 'passable' if (hp or (hd and hs)) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
             objs.append(o)
         elif k in ('end', 'enddef'):
             continue  # stray terminator
@@ -310,10 +362,19 @@ def parse(text):
             if o.t == 'teleporter' and o.name == fn:
                 if fface == 'f': o.link = tn
                 elif fface == 'b': o.blink = tn
-    return nw, objs, materials, defines, extras
+    return nw, objs, materials, defines, extras, options_text
 
 
 def obj_block(o):
+    if o.t == 'zone':
+        ln = ['zone']
+        if o.name: ln.append('  name %s' % o.name)
+        ln += ['  position %s %s %s' % (num(o.x), num(o.y), num(o.z)),
+               '  size %s %s %s' % (num(o.sx), num(o.sy), num(o.sz)), '  rotation %s' % num(o.r)]
+        ln += ['  ' + fl for fl in o.zflags.splitlines() if fl.strip()]
+        if o.zteam: ln.append('  team ' + ' '.join(str(t) for t in o.zteam))
+        if o.zsafety: ln.append('  safety ' + ' '.join(str(t) for t in o.zsafety))
+        return ln + ['end']
     if o.t == 'mesh':
         ln = ['mesh'] + ['  ' + b for b in MESHDATA.get(o.mesh, [])]
         if o.x or o.y or o.z: ln.append('  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)))
@@ -333,6 +394,8 @@ def obj_block(o):
         if o.angle != 360: ln.append('  angle %s' % num(o.angle))
         if o.ratio: ln.append('  ratio %s' % num(o.ratio))
     if o.t == 'cone': ln.append('  divisions %d' % o.divisions)
+    if o.t == 'pyramid' and o.flipz: ln.append('  flipz')
+    if o.t in ('box', 'pyramid', 'arc', 'cone') and o.phys != 'normal': ln.append('  ' + o.phys)
     if o.matref: ln.append('  matref %s' % o.matref)
     if o.t in FACES and o.mats:
         # BZFlag ignores partial per-face lists on arcs, so unset arc faces fall back to the
@@ -359,13 +422,15 @@ class Model(QObject):
         super().__init__()
         s.W, s.objs, s.sel, s.msel, s.undo, s.path = 400, [], None, [], [], None
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
+        s.options_text = ''
         s.nid, s.sym = 1, 0
         s.tool, s.snap = 'select', True
 
     def push(s):
         d = {'W': s.W, 'objs': [asdict(o) for o in s.objs],
              'materials': {k: asdict(v) for k, v in s.materials.items()},
-             'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras}
+             'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras,
+             'options_text': s.options_text}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -375,6 +440,7 @@ class Model(QObject):
         s.materials = {k: Material(**v) for k, v in d['materials'].items()}
         s.defines = {k: [Obj(**o) for o in v] for k, v in d['defines'].items()}
         s.extras = d.get('extras', [])
+        s.options_text = d.get('options_text', '')
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
 
@@ -456,6 +522,13 @@ class Model(QObject):
         for q in fam:
             if q is o: continue
             q.x, q.y, q.r = _xform(q.fam_k, x0, y0, r0, mode, fold)
+            q.flipz, q.phys, q.zflags = o.flipz, o.phys, o.zflags
+            # a zone's team/safety lists swap or cycle the same way a base's team does, per
+            # entry (team 0/rogue is left alone, same rule _team_fwd already applies to bases)
+            z0team = [_team_inv(o.fam_k, t, mode, fold) for t in o.zteam]
+            q.zteam = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0team))
+            z0safe = [_team_inv(o.fam_k, t, mode, fold) for t in o.zsafety]
+            q.zsafety = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0safe))
             for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref'):
                 setattr(q, f, getattr(o, f))
             q.mats = dict(o.mats)
@@ -518,9 +591,9 @@ class Model(QObject):
         return name
 
     def load(s, text, folder=None):
-        nw, objs, materials, defines, extras = parse(text)
+        nw, objs, materials, defines, extras, options_text = parse(text)
         s.push(); s.W = nw or s.W; s.objs = objs; s.materials = materials; s.defines = defines
-        s.extras = extras
+        s.extras = extras; s.options_text = options_text
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
         s.texcache = {}
@@ -528,6 +601,8 @@ class Model(QObject):
 
     def text(s):
         out = ['# Made with BZ Map Maker', 'world', '  size %s' % num(s.W), 'end', '']
+        if s.options_text.strip():
+            out += ['options'] + ['  ' + ln for ln in s.options_text.splitlines() if ln.strip()] + ['end', '']
         for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
         for name, kids in s.defines.items():
@@ -578,7 +653,10 @@ HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select 
         'base': 'Click to place a base, then set its team in the panel.',
         'teleporter': 'Click to place a teleporter, then set its links in the panel.',
         'arc': 'Drag corner to corner, or click for a default arc. Set sweep angle and hollow ratio in the panel.',
-        'cone': 'Drag corner to corner, or click for a default cone.'}
+        'cone': 'Drag corner to corner, or click for a default cone.',
+        'zone': 'Drag corner to corner, or click for a default zone. Set spawn teams, safety teams and '
+                'flags in the panel -- zones are invisible in the real game, shown here as a checkered '
+                'aid colored by which teams spawn there.'}
 
 
 class Editor(QWidget):
@@ -645,6 +723,20 @@ class Editor(QWidget):
                 p.setBrush(QColor('#f6f5f0')); p.drawEllipse(QRectF(-leaf.sx * ir, -leaf.sy * ir, 2 * leaf.sx * ir, 2 * leaf.sy * ir))
             if leaf.t == 'cone':
                 p.setPen(cpen('#22262b')); p.drawEllipse(QRectF(-leaf.sx * .12, -leaf.sy * .12, leaf.sx * .24, leaf.sy * .24))
+        elif leaf.t == 'zone':
+            # Zones are invisible in the actual game -- this checkerboard is an editor aid only,
+            # one color per spawning team (0=rogue=black), so you can see coverage at a glance.
+            colors = zone_colors(leaf)
+            cell = max(2.0, min(10.0, min(leaf.sx, leaf.sy) / 2 or 2.0))
+            nx = max(1, round(2 * leaf.sx / cell)); ny = max(1, round(2 * leaf.sy / cell))
+            cw, ch = 2 * leaf.sx / nx, 2 * leaf.sy / ny
+            p.setPen(Qt.PenStyle.NoPen)
+            for ix in range(nx):
+                for iy in range(ny):
+                    col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(160)
+                    p.setBrush(col); p.drawRect(QRectF(-leaf.sx + ix * cw, -leaf.sy + iy * ch, cw, ch))
+            p.setPen(cpen('#22262b', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
         else:
             a, b = max(leaf.sx, 1.2 / S if leaf.t == 'teleporter' else 0), leaf.sy
             c = QColor(TEAM[leaf.team] if leaf.t == 'base' else COL[leaf.t])
@@ -652,6 +744,8 @@ class Editor(QWidget):
             p.setPen(cpen('#22262b')); p.setBrush(c); p.drawRect(QRectF(-a, -b, 2 * a, 2 * b))
             if leaf.t == 'pyramid':
                 p.drawLine(QPointF(-a, -b), QPointF(a, b)); p.drawLine(QPointF(a, -b), QPointF(-a, b))
+                if leaf.flipz:  # small dot marks a flipped (point-down) pyramid
+                    p.setBrush(QColor('#22262b')); p.drawEllipse(QPointF(0, 0), min(a, b) * .18, min(a, b) * .18)
         if sel:
             pad = 3 / S
             hx = s.m.group_bounds(leaf.name)[0] if leaf.t == 'group' else max(leaf.sx, 1)
@@ -728,7 +822,7 @@ class Editor(QWidget):
             m.select(o)
             if o: m.push(); s.drag = ('move', o, o.x - wx, o.y - wy)
             else: s.drag = pan
-        elif s.m.tool in ('box', 'pyramid', 'arc', 'cone'):
+        elif s.m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone'):
             a = (s.sn(wx), s.sn(wy)); s.drag = ['make', a, a, p.x(), p.y()]
         else:
             m.push(); o = m.add(s.m.tool, s.sn(wx), s.sn(wy)); m.make_family(o); m.select(o); m.changed.emit()
@@ -893,15 +987,19 @@ class Preview(QWidget):
             col = QColor(TEAM[o.team] if o.t == 'base' else COL.get(o.t, '#8d939a'))
             C = lambda face, o=o, col=col: s.face_color(o, face, col)
             z0 = o.z; z1 = z0 + max(o.sz, .3)
+            if o.t == 'zone':
+                F += s.zone_faces(o, P, z1); continue
             if o.t == 'arc':
                 F += s.arc_faces(o, P, z0, z1, C); continue
             if o.t == 'cone':
                 F += s.cone_faces(o, P, z0, z1, C('')); continue
-            b = [P(-o.sx, -o.sy, z0), P(o.sx, -o.sy, z0), P(o.sx, o.sy, z0), P(-o.sx, o.sy, z0)]
             if o.t == 'pyramid':
-                ap = P(0, 0, z1)
+                apex_z, base_z = (z0, z1) if o.flipz else (z1, z0)  # flipz: point down instead of up
+                b = [P(-o.sx, -o.sy, base_z), P(o.sx, -o.sy, base_z), P(o.sx, o.sy, base_z), P(-o.sx, o.sy, base_z)]
+                ap = P(0, 0, apex_z)
                 F += [([b[i], b[(i + 1) % 4], ap], C(''), o, None) for i in range(4)] + [(b, C(''), o, None)]
             else:
+                b = [P(-o.sx, -o.sy, z0), P(o.sx, -o.sy, z0), P(o.sx, o.sy, z0), P(-o.sx, o.sy, z0)]
                 t = [(x, y, z1) for x, y, _ in b]
                 F.append((b, C('bottom'), o, None)); F.append((t, C('top'), o, None))
                 for i in range(4):
@@ -924,6 +1022,24 @@ class Preview(QWidget):
                 col = QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
             out.append((pts, col, src, None))
         return out
+
+    def zone_faces(s, o, P, ztop):
+        """Zones have no appearance in the actual game -- this is purely an editor aid, so it's
+        drawn as a thin, translucent, checkered top surface (one color per spawning team) rather
+        than a solid box, to make clear it isn't real geometry. Reuses the existing flat-color
+        rasterizer by subdividing into small flat cells instead of needing real texture support."""
+        colors = zone_colors(o)
+        cell = max(2.0, min(10.0, min(o.sx, o.sy) / 2 or 2.0))
+        nx = max(1, round(2 * o.sx / cell)); ny = max(1, round(2 * o.sy / cell))
+        cw, ch = 2 * o.sx / nx, 2 * o.sy / ny
+        F = []
+        for ix in range(nx):
+            for iy in range(ny):
+                col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(170)
+                x0, y0 = -o.sx + ix * cw, -o.sy + iy * ch
+                quad = [P(x0, y0, ztop), P(x0 + cw, y0, ztop), P(x0 + cw, y0 + ch, ztop), P(x0, y0 + ch, ztop)]
+                F.append((quad, col, o, None))
+        return F
 
     def face_color(s, o, face, default):
         """Color of one face: its own material, else the object's all-faces material, else default."""
@@ -1099,7 +1215,7 @@ class Preview(QWidget):
             m.select(o)
             if o: m.push(); s.act = ('move', o, o.z)
             else: s.act = None
-        elif m.tool in ('box', 'pyramid', 'arc', 'cone'):
+        elif m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone'):
             hit = ray_ground(*s.ray(p))
             if hit:
                 a = (s.sn(hit[0]), s.sn(hit[1])); s.act = ('make', a, a, p)
@@ -1171,6 +1287,38 @@ def average_color(img):
         for x in range(small.width()):
             c = small.pixelColor(x, y); r += c.red(); g += c.green(); b += c.blue()
     return (r / n / 255, g / n / 255, b / n / 255, 1.0)
+
+
+class OptionsDialog(QDialog):
+    """The map's 'options' block: raw BZFS command-line text, written out exactly as typed.
+    There's no real structure to this block (see wiki.bzflag.org/Options_(object)) -- it's
+    whatever flags you'd otherwise pass to bzfs on the command line, including -set for any
+    BZDB server variable -- so a plain text box is the most direct, complete way to edit it."""
+    PLACEHOLDER = ('-set _tankSpeed 36\n-j +r -ms 3\n-sb -fb\n+f GM{5} +f SW{5}\n')
+
+    def __init__(s, m):
+        super().__init__(); s.m = m
+        s.setWindowTitle('Map Options'); s.resize(520, 420)
+        col = QVBoxLayout(s)
+        note = QLabel('One option per line (or several separated by spaces), exactly as you would '
+                      'pass them to bzfs. A few examples:\n'
+                      '  +r            ricochet is on for every shot\n'
+                      '  -j            allows jumping\n'
+                      '  -sb  -fb      allows spawning and flags on top of buildings\n'
+                      '  +f SE{2}      two Super flags are randomly placed on the map\n'
+                      '  -set _thiefAdLife .2   sets a server variable (any value from the Server '
+                      'Variables page)\n\n'
+                      'Full option list: wiki.bzflag.org/BZFS_Command_Line_Options\n'
+                      'Server variables: wiki.bzflag.org/Server_Variables')
+        note.setWordWrap(True); col.addWidget(note)
+        s.text = QPlainTextEdit(); s.text.setPlainText(m.options_text)
+        s.text.setStyleSheet('font-family: monospace;'); s.text.setPlaceholderText(s.PLACEHOLDER)
+        col.addWidget(s.text)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(s.save); bb.rejected.connect(s.reject); col.addWidget(bb)
+
+    def save(s):
+        s.m.push(); s.m.options_text = s.text.toPlainText(); s.m.changed.emit(); s.accept()
 
 
 class MaterialsDialog(QDialog):
@@ -1364,6 +1512,7 @@ class Win(QMainWindow):
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
+        s.act(ob, 'Map Options...', s.open_options)
         vw = s.menuBar().addMenu('&View')
         lg = QActionGroup(s); cur_mode = s.settings.value('layoutMode', 'split')
         split_a = QAction('Side by Side', s); split_a.setCheckable(True); split_a.setChecked(cur_mode != 'radar')
@@ -1376,7 +1525,7 @@ class Win(QMainWindow):
             ca = QAction(label, s); ca.setCheckable(True); ca.setChecked(key == cur_corner)
             ca.triggered.connect(lambda _, k=key: s.set_corner(k)); cg.addAction(ca); cm.addAction(ca)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
-        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
+        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
             a.triggered.connect(lambda _, t=t: setattr(s.m, 'tool', t)); g.addAction(a); tb.addAction(a)
         tb.addSeparator(); sn = QAction('Snap to 5', s); sn.setCheckable(True); sn.setChecked(True)
@@ -1405,9 +1554,21 @@ class Win(QMainWindow):
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
         s.mat = QComboBox(); s.mat.setEditable(True); s.mat.currentTextChanged.connect(lambda t: s.edit('matref', t))
+        s.flip = QCheckBox('Flip (point down)'); s.flip.toggled.connect(lambda v: s.edit('flipz', v))
+        s.phys = QComboBox(); s.phys.addItems(['Normal', 'Drivethrough', 'Shootthrough', 'Passable'])
+        s.phys.currentIndexChanged.connect(lambda i: s.edit('phys', ['normal', 'drivethrough', 'shootthrough', 'passable'][i]))
+        s.zteam = QLineEdit(); s.zteam.setPlaceholderText('e.g. 0 1 2 3 4 (0=rogue, 1-4=team colors)')
+        s.zteam.editingFinished.connect(lambda: s.edit('zteam', s._parse_ints(s.zteam.text(), 0, 4)))
+        s.zsafety = QLineEdit(); s.zsafety.setPlaceholderText('e.g. 1 2 3 4')
+        s.zsafety.editingFinished.connect(lambda: s.edit('zsafety', s._parse_ints(s.zsafety.text(), 1, 4)))
+        s.zflags = QPlainTextEdit(); s.zflags.setMaximumHeight(90)
+        s.zflags.setPlaceholderText("one per line, e.g.:\nflag L\nzoneflag GM 2\nSee bzflag.org/documentation/flags")
+        s.zflags.textChanged.connect(lambda: s.edit('zflags', s.zflags.toPlainText()))
         fl.addRow('Team', s.team); fl.addRow('Group team override', s.gteam); fl.addRow('Group prefab', s.gname)
         fl.addRow('Front links to', s.link); fl.addRow('Back links to', s.blink)
         fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
+        fl.addRow(s.flip); fl.addRow('Passability', s.phys)
+        fl.addRow('Spawn teams', s.zteam); fl.addRow('Safety for teams', s.zsafety); fl.addRow('Flags', s.zflags)
         fl.addRow('Material (all faces)', s.mat)
         s.face = {}
         for fk, fl_ in (('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom'), ('inside', 'Inside'),
@@ -1509,11 +1670,15 @@ class Win(QMainWindow):
                 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group',
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
-                'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone')}
+                'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'flip': o and o.t == 'pyramid',
+                'phys': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'zteam': o and o.t == 'zone',
+                'zsafety': o and o.t == 'zone', 'zflags': o and o.t == 'zone'}
         for name, vis in rows.items():
             widget = {'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
-                      'link': s.link, 'blink': s.blink, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat}[name]
+                      'link': s.link, 'blink': s.blink, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
+                      'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
+                      'zflags': s.zflags}[name]
             row = s.dock.widget().layout().labelForField(widget)
             widget.setVisible(bool(vis))
             if row: row.setVisible(bool(vis))
@@ -1538,7 +1703,22 @@ class Win(QMainWindow):
                 cur = o.mats.get(fk, '')
                 cb.clear(); cb.addItems([''] + sorted(set(s.m.materials) | ({cur} if cur else set())))
                 cb.setCurrentText(cur)
+            s.flip.setChecked(o.flipz if o.t == 'pyramid' else False)
+            s.phys.setCurrentIndex(['normal', 'drivethrough', 'shootthrough', 'passable'].index(o.phys)
+                                    if o.phys in ('normal', 'drivethrough', 'shootthrough', 'passable') else 0)
+            s.zteam.setText(' '.join(str(t) for t in o.zteam) if o.t == 'zone' else '')
+            s.zsafety.setText(' '.join(str(t) for t in o.zsafety) if o.t == 'zone' else '')
+            s.zflags.setPlainText(o.zflags if o.t == 'zone' else '')
         s.ws.setValue(s.m.W); s.busy = False
+
+    def _parse_ints(s, text, lo, hi):
+        out = []
+        for tok in text.replace(',', ' ').split():
+            try:
+                v = int(tok)
+                if lo <= v <= hi: out.append(v)
+            except ValueError: pass
+        return sorted(set(out))
 
     def set_world(s, v):
         if not s.busy and v != s.m.W: s.m.push(); s.m.W = v; s.ed.fit(); s.m.changed.emit()
@@ -1550,6 +1730,9 @@ class Win(QMainWindow):
     def open_materials(s):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
+    def open_options(s):
+        OptionsDialog(s.m).exec()
+
     def import_mesh(s):
         """Pull one or more 'mesh ... end' objects out of another .bzw (or a file that's
         just a mesh block on its own) and drop them into the current map at the origin."""
@@ -1560,7 +1743,7 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Import failed', str(e)); return
-        nw, objs, materials, defines, extras = parse(text)
+        nw, objs, materials, defines, extras, options_text = parse(text)
         meshes = [o for o in objs if o.t == 'mesh']
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
