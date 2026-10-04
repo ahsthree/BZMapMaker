@@ -4,9 +4,12 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-[![BZ Map Maker Logo](https://private-user-images.githubusercontent.com/3525077/663373667-b0ae3259-002a-4ccf-bc00-c6b8419f9ae3.png)](https://private-user-images.githubusercontent.com/3525077/663373667-b0ae3259-002a-4ccf-bc00-c6b8419f9ae3.png)
-[![Screenshot From 2026-09-30 19-43-21](https://private-user-images.githubusercontent.com/3525077/662634248-25c6992b-4673-46d5-942a-45d08dc6e006.png)](https://private-user-images.githubusercontent.com/3525077/662634248-25c6992b-4673-46d5-942a-45d08dc6e006.png)
-[![Screenshot From 2026-09-30 19-44-01](https://private-user-images.githubusercontent.com/3525077/662634403-0d1c4358-5a21-4fcc-ab69-987267525b4a.png)](https://private-user-images.githubusercontent.com/3525077/662634403-0d1c4358-5a21-4fcc-ab69-987267525b4a.png)
+<img width="542" height="181" alt="bzmm-logo" src="https://github.com/user-attachments/assets/b087f9b6-16e9-4e02-95d7-df9d05986d25" />
+
+<img width="1362" height="860" alt="Screenshot From 2026-10-03 22-32-58" src="https://github.com/user-attachments/assets/46a7ce16-e6e9-402e-9f5a-30dfe4ba4421" />
+
+<img width="1362" height="860" alt="Screenshot From 2026-10-03 22-32-03" src="https://github.com/user-attachments/assets/f451a4d5-dba9-4e85-afac-f1957e2ef4f0" />
+
 
 ## What's new
 
