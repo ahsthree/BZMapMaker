@@ -4,23 +4,24 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-<img width="1254" height="1254" alt="BZ Map Maker Logo" src="https://github.com/user-attachments/assets/b0ae3259-002a-4ccf-bc00-c6b8419f9ae3" />
-
-
-<img width="1920" height="1051" alt="Screenshot From 2026-09-30 19-43-21" src="https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006" />
-
-
-<img width="1920" height="1051" alt="Screenshot From 2026-09-30 19-44-01" src="https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a" />
-
+[![BZ Map Maker Logo](https://private-user-images.githubusercontent.com/3525077/663373667-b0ae3259-002a-4ccf-bc00-c6b8419f9ae3.png)](https://private-user-images.githubusercontent.com/3525077/663373667-b0ae3259-002a-4ccf-bc00-c6b8419f9ae3.png)
+[![Screenshot From 2026-09-30 19-43-21](https://private-user-images.githubusercontent.com/3525077/662634248-25c6992b-4673-46d5-942a-45d08dc6e006.png)](https://private-user-images.githubusercontent.com/3525077/662634248-25c6992b-4673-46d5-942a-45d08dc6e006.png)
+[![Screenshot From 2026-09-30 19-44-01](https://private-user-images.githubusercontent.com/3525077/662634403-0d1c4358-5a21-4fcc-ab69-987267525b4a.png)](https://private-user-images.githubusercontent.com/3525077/662634403-0d1c4358-5a21-4fcc-ab69-987267525b4a.png)
 
 ## What's new
 
+- **Options object** (`Objects → Map Options...`): a plain text box for BZFS command-line options and `-set` server variables (`-j`, `+r`, `-sb -fb`, `+f SE{2}`, `-set _thiefAdLife .2`, and so on) — the real `.bzw` format is itself just raw command-line text here, so that's exactly how it's edited.
+- **Zone objects**, with a genuinely useful visualization: a zone is drawn as a translucent, checkerboard-colored patch in both the 2D and 3D views, colored by which teams can spawn there (black for rogue, red/green/blue/purple for the rest, a mix of colors checkered together when more than one team shares a zone). Zones are invisible in the real game — this is purely an editor aid for seeing spawn coverage at a glance.
+- **Pyramids can flip upside-down** (`flipz`), apex pointing down instead of up.
+- **Passability** on boxes, pyramids, arcs, and cones: Normal, Drivethrough, Shootthrough, or Passable (both at once), matching the `.bzw` keywords directly.
+- All four of the above carry correctly through symmetry — including a zone's spawn-team list, which now swaps or cycles teams right along with its siblings the same way a base's team does.
+- **Packaging:** a real, tested Debian `.deb` (dependencies install automatically via `apt`), plus ready-to-run build scripts for a Windows installer and a macOS `.dmg`, and a GitHub Actions workflow that builds all three automatically on push — see `packaging/BUILDING.md`.
 - **Edit directly in 3D**, with the 2D view available either side by side or as a small radar overlay (**View** menu).
 - **A real per-pixel depth buffer** for the 3D view (built with NumPy), replacing the old approach of sorting whole shapes — overlapping objects, especially long thin ones, now always render in the correct order.
 - **Map Text panel**, tabbed with the Selected Object panel: view or hand-edit the raw `.bzw` text directly, with **Apply to Map** that can automatically build symmetry for anything new you typed, using whatever mode is active in the toolbar.
 - **Textures now show a real color** instead of plain white in the 3D view — loading a local PNG or fetching one from a URL fills in its average color automatically (the actual image still isn't drawn, just its color).
 - **Ctrl+click multi-select works in the 3D view too**, and 3D picking uses true ray depth — so an object hidden under another in the flat 2D view can be reached by orbiting to an angle where it's exposed and clicking it directly.
-- **3-, and 4-team rotational symmetry**, generalized from the original 2-team mode, plus an axis compass in the 2D view and a live-turning gizmo in the 3D view.
+- **2-, 3-, and 4-team rotational symmetry**, generalized from the original 2-team mode, plus an axis compass in the 2D view and a live-turning gizmo in the 3D view.
 - **Arcs, cones, groups (reusable prefabs), and mesh objects** are now readable, writable, and (except meshes and prefabs) fully editable.
 - Older maps' teleporter names and numeric-style links are now read correctly and upgraded to the modern format on save.
 - Recent Files list, persisted between sessions.
@@ -29,14 +30,16 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 - **Edit directly in 3D.** Click to select, drag to move, Shift+drag to rotate, drag to place and size new objects — all in the same 3D view you use to look at your map. Orbit with the right or middle mouse button (or Space+drag), and zoom with the scroll wheel.
 - **2D layout view**, either side by side with the 3D view or as a small fixed radar overlay in a corner of your choice.
-- **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, and prefab groups.
+- **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, zones, and prefab groups.
 - **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte-for-byte, even though the editor itself can't reshape one.
 - **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
-- **s**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
+- **Materials**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
 - **A real depth buffer** for the 3D view, so overlapping objects always render in the correct order — no more long, thin objects glitching through nearby ones.
 - **Map Text panel** for viewing or hand-editing the raw `.bzw` text, with optional automatic symmetry for anything new you type.
+- **An Options block** for server command-line options and variables, and **Zone objects** with a spawn-team visualization.
 - **Real files:** open, edit, and save `.bzw` worlds, including ones from other tools or from years-old maps. Undo, duplicate, snap-to-grid, recent-files list.
 - **Import Mesh Object** to pull a mesh out of another `.bzw` file and drop it into the map you're working on.
+- **Installable packages** for Debian/Ubuntu (`.deb`), Windows, and macOS — see Packaging below.
 
 ## Installation
 
@@ -46,6 +49,8 @@ You need **Python 3.9 or newer**, **PyQt6**, and **NumPy** (NumPy powers the 3D 
 python bzmapmaker.py                # start with a blank map
 python bzmapmaker.py mymap.bzw      # open an existing map
 ```
+
+Prefer an installer? See **Packaging** near the end of this README for a one-click `.deb`, or build one for Windows/macOS.
 
 ### Chromebook (Linux / Crostini)
 
@@ -111,7 +116,7 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building a map
 
-The 3D view is where you build. Pick a tool in the toolbar: **Select, Box, Pyramid, Base, Teleporter, Arc,** or **Cone**.
+The 3D view is where you build. Pick a tool in the toolbar: **Select, Box, Pyramid, Base, Teleporter, Arc, Cone,** or **Zone**.
 
 | Action | In the 3D view | In the 2D view |
 |---|---|---|
@@ -119,7 +124,7 @@ The 3D view is where you build. Pick a tool in the toolbar: **Select, Box, Pyram
 | Add to the selection (for grouping) | Ctrl+click | Ctrl+click |
 | Move the selected object | Drag it | Drag it |
 | Rotate the selected object | Shift+drag | Edit "Rotation" in the panel |
-| Place a Box/Pyramid/Arc/Cone | Drag corner to corner, or click for a default size | Drag corner to corner, or click for a default size |
+| Place a Box/Pyramid/Arc/Cone/Zone | Drag corner to corner, or click for a default size | Drag corner to corner, or click for a default size |
 | Place a Base/Teleporter | Click | Click |
 | Orbit the camera | Right or middle mouse button, or Space+drag | — |
 | Pan the view | — | Drag empty space, or right/middle mouse button, or Space+drag |
@@ -159,6 +164,24 @@ Each teleporter has a unique name and two link settings, **Front links to** and 
 
 Arcs have a **Sweep angle** (360° is a full circle) and a **Hollow ratio** (0 is solid, closer to 1 is a thin ring) plus **Divisions** for how many segments make up the curve. Cones just have **Divisions**. Both can have a single all-faces material, or (arcs only) separate materials per face — see Materials below.
 
+### Pyramids: flipping upside-down
+
+Check **Flip (point down)** in the panel to turn a pyramid on its head, apex toward the ground instead of the sky — written as the bare `flipz` keyword in the file. In the 2D top-down view (where you can't see which way a pyramid points just by looking straight down), a flipped one is marked with a small dot.
+
+### Passability
+
+Boxes, pyramids, arcs, and cones have a **Passability** field: **Normal** (solid, the default), **Drivethrough** (tanks pass, shots don't), **Shootthrough** (shots pass, tanks don't), or **Passable** (both). This writes the matching `drivethrough`/`shootthrough`/`passable` keyword directly.
+
+### Zones
+
+The **Zone** tool places an invisible trigger area — used to control where each team can spawn, and/or to make certain flags appear there. In the panel:
+
+- **Spawn teams**: which teams may spawn in this zone, entered as the team numbers separated by spaces or commas (`0` = rogue, `1`-`4` = red/green/blue/purple).
+- **Safety teams**: which teams' flags are teleported to safety here if dropped, same number format.
+- **Flags**: a small text box for `flag X` and `zoneflag X N` lines (one per line) — see the [flags list](https://www.bzflag.org/documentation/flags/) for valid flag abbreviations. `flag good` and `flag bad` are also valid, meaning "any good flag" / "any bad flag."
+
+Since zones have no appearance in the real game, both views draw a translucent checkerboard over the zone's footprint instead, colored by its spawn teams — solid black for a rogue-only zone, a single team color if only one team spawns there, or a checker pattern mixing every listed team's color if more than one does. This is purely an editor aid for seeing spawn coverage at a glance; it draws nothing in-game.
+
 ### Groups
 
 Select two or more objects (Ctrl+click each one), then **Edit → Group Selected** (Ctrl+G). This saves their layout as a reusable prefab (a `define` block, positioned relative to their combined center) and replaces them with a single **group** instance you can move and rotate as a whole. A group can optionally override the team color of every base inside it — set this in the panel's **Group team override** field. Groups currently can't be edited back into their individual pieces or reshaped after creation; delete the instances and edit the file by hand if you need to change a prefab.
@@ -179,7 +202,7 @@ Choose a mode from the toolbar drop-down **before** placing objects (or before d
 A few things to know:
 - **2-team and 4-team rotation always stay inside a square world**, no matter where you place the object. **3-team (120°) rotation can't make that same guarantee** — a 120° turn genuinely mixes the X and Y axes, so a copy can land outside the world if the object sits farther from the center than the world's half-width (roughly, out near a corner). The editor automatically pulls the whole set toward the center to keep everyone inside the world when this would happen, and the status bar tells you when it does. Keep new 3-team objects reasonably close to the center to avoid this.
 - **Teleporters** in a symmetric set are automatically linked to each other in a ring.
-- **Bases** swap or cycle team colors as described above; other object types are untouched, since "team" has no meaning for them.
+- **Bases** swap or cycle team colors as described above. **Zones** do the same with their spawn-team and safety-team lists (a zone set to team 1 gets a team-2 sibling in 2-team mode, and so on) — rogue (team 0) is left alone, same as it would be for a base. Other object types are untouched, since "team" has no meaning for them.
 - **Duplicate** (Ctrl+D) clones only the one selected object and builds it a fresh, correctly centered family if a symmetry mode is on — it doesn't try to translate a whole existing family, since that would break the symmetry.
 - Symmetry linkage is **not saved in the `.bzw` file**. After you save and reopen a map, the copies are ordinary, independent objects — though see Map Text below for a way around this when hand-editing.
 
@@ -202,10 +225,23 @@ The 3D view colors each face by its material; the actual texture image isn't dra
 http://images.bzflag.org/astevens/concrete.png
 ```
 - A pasted `https://` link is automatically rewritten to `http://`, since that's the only scheme BZFlag actually loads.
-- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved download by default clients).
+- If the URL isn't under `http://images.bzflag.org/`, a warning appears (it still saves — the warning just tells you it likely won't be approved to load in default client).
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
 Every other material setting from an imported file — `addtexture`, `texmat`, `ambient`, and so on — is preserved exactly even though this editor doesn't expose controls for it.
+
+### Map Options
+
+**Objects → Map Options...** opens a plain text box for the map's `options` block — the real file format is itself just raw `bzfs` command-line text, with no further structure, so that's exactly how it's edited here. One option per line (or several separated by spaces):
+
+```
+-set _tankSpeed 36
+-j +r -ms 3
+-sb -fb
++f SE{2}
+```
+
+A few starting examples: `+r` turns on ricochet for every shot, `-j` allows jumping, `-sb -fb` allows spawning and flags on top of buildings, `+f SE{2}` scatters two Super flags randomly, and `-set` sets any [server variable](https://wiki.bzflag.org/Server_Variables) (for example `-set _thiefAdLife .2`). See [BZFS Command Line Options](https://wiki.bzflag.org/BZFS_Command_Line_Options) for the full list.
 
 ### Map Text (advanced)
 
@@ -225,7 +261,7 @@ Tabbed alongside the Selected Object panel — click the tab to switch to it. Th
 
 ## Supported `.bzw` content
 
-Reads and writes `world`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`, `mesh`, `material`, `define`/`group`, and `link` blocks, plus per-face `matref` on boxes and arcs. Any block type this editor doesn't specifically handle (walls, physics drivers, dynamic colors, zones, texture matrices...) is preserved exactly as written and saved back unchanged — it just isn't drawn or editable here.
+Reads and writes `world`, `options`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`, `zone`, `mesh`, `material`, `define`/`group`, and `link` blocks, plus per-face `matref` on boxes and arcs, `flipz` on pyramids, and `drivethrough`/`shootthrough`/`passable` on boxes, pyramids, arcs, and cones. Any block type this editor doesn't specifically handle (walls, physics drivers, dynamic colors, texture matrices...) is preserved exactly as written and saved back unchanged — it just isn't drawn or editable here.
 
 **Known limits:**
 - Meshes can be moved but not reshaped, rotated, or scaled here.
@@ -239,6 +275,15 @@ Reads and writes `world`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`,
 ## Notes on the 3D view
 
 The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order — this fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
+
+## Packaging
+
+Real installers are available for all three major platforms — see `packaging/BUILDING.md` for full instructions. In short:
+
+- **Debian/Ubuntu:** `bash packaging/debian/build_deb.sh` produces a `.deb` that pulls in PyQt6 and NumPy automatically via `apt install ./bzmapmaker_1.0-1.deb`.
+- **Windows:** build with PyInstaller, then compile `packaging/windows/installer.iss` with Inno Setup for a `Setup.exe` that bundles everything — nothing to install separately.
+- **macOS:** `bash packaging/macos/build_macos.sh` produces a `.dmg` with a drag-to-Applications `.app` (unsigned, so Gatekeeper shows a one-time "unidentified developer" warning without an Apple Developer account).
+- **Don't own all three operating systems?** Copy `packaging/github-workflow-build.yml` to `.github/workflows/build.yml` and push a version tag — GitHub builds genuine native packages for all three on its own machines and attaches them to a release.
 
 ## Ideas for the future
 
