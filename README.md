@@ -13,6 +13,22 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 ## What's new
 
+Here's a summary of the newest additions (this latest round of work):
+
+## Newest additions
+
+**Mesh import now groups automatically.** Importing a mesh via `Objects → Import Mesh Object` wraps it in a prefab (`mesh-group`) instead of adding it as a loose object. The payoff: duplicating or mirroring a mesh with symmetry now shares one copy of the geometry across all instances instead of multiplying file size with every copy. Opening a map that already has a mesh in it is unaffected — it stays exactly where it is.
+
+**Ricochet.** A new per-object option (box, pyramid, arc, cone, and group) that makes shots always bounce off that surface, independent of the server's global ricochet setting.
+
+**Group tint.** Groups can now carry a color tint that multiplies everything inside them — useful for recoloring one instance of a shared prefab (say, to match a team's color) without touching the base material everywhere else it's used.
+
+**Tint, ricochet, and physics-driver assignment now follow symmetry correctly.** Set a tint or a physics driver on one object in a symmetric set, and every sibling now picks it up automatically — this was previously a gap for all three.
+
+**Physics launch trajectories, drawn from real projectile physics.** Any object with a physics driver that has an upward `linear` velocity now shows its predicted flight path: a parabolic arc with a landing marker in the 3D view, and a simpler top-down line-and-marker in the 2D view. It's computed with standard projectile motion (the same gravity constant BZFlag's own documentation uses), not an approximation — so the landing point it shows is the actual landing point.
+
+
+
 - **Options object** (`Objects → Map Options...`): a plain text box for BZFS command-line options and `-set` server variables (`-j`, `+r`, `-sb -fb`, `+f SE{2}`, `-set _thiefAdLife .2`, and so on) — the real `.bzw` format is itself just raw command-line text here, so that's exactly how it's edited.
 - **Zone objects**, with a genuinely useful visualization: a zone is drawn as a translucent, checkerboard-colored patch in both the 2D and 3D views, colored by which teams can spawn there (black for rogue, red/green/blue/purple for the rest, a mix of colors checkered together when more than one team shares a zone). Zones are invisible in the real game — this is purely an editor aid for seeing spawn coverage at a glance.
 - **Pyramids can flip upside-down** (`flipz`), apex pointing down instead of up.
