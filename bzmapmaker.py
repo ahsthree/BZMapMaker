@@ -56,6 +56,9 @@ class Obj:
     sx: float = 1; sy: float = 1; sz: float = 1
     r: float = 0; team: int = 1; name: str = ''; link: str = ''; blink: str = ''
     matref: str = ''
+    phydrv: str = ''  # box/pyramid/arc/cone: name of a physics driver, if any
+    ricochet: bool = False  # box/pyramid/arc/cone/group: shots bounce off instead of exploding
+    tint: tuple = (1.0, 1.0, 1.0, 1.0)  # group only: tints every object inside it
     mats: dict = field(default_factory=dict)  # per-face materials (box, arc): face key -> material name
     mesh: str = ''  # key into MESHDATA: the mesh block's original text, kept verbatim
     flipz: bool = False  # pyramid only: point down instead of up
@@ -78,6 +81,25 @@ class Material:
     color: tuple = (1.0, 1.0, 1.0, 1.0)
     extra: list = field(default_factory=list)  # every other line (addtexture, texmat, ambient...), kept as-is
     raw: list = field(default_factory=list)    # the block's original lines; written back unchanged until edited
+
+
+@dataclass
+class PhysicsDriver:
+    """A physics driver affects any tank touching the object it's attached to: linear push
+    (conveyors, trampolines), angular spin (turntables), slide (slippery surfaces), or an
+    instant-death message (landmines). Each capability is written only if has_* is set, so a
+    driver that only uses 'slide' doesn't also emit an unwanted 'linear 0 0 0' line."""
+    name: str
+    linear: tuple = (0.0, 0.0, 0.0)
+    angular: tuple = (0.0, 0.0, 0.0)  # (rotation speed, center x, center y)
+    slide: float = 0.0
+    death: str = ''
+    has_linear: bool = False
+    has_angular: bool = False
+    has_slide: bool = False
+    has_death: bool = False
+    extra: list = field(default_factory=list)
+    raw: list = field(default_factory=list)
 
 
 def num(v):
@@ -194,7 +216,7 @@ def parse(text):
     lines = [ln.split('#', 1)[0].rstrip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln.strip()]
     i = 0
-    nw, objs, materials, defines, links, extras, options_text = None, [], {}, {}, [], [], ''
+    nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
            'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
@@ -248,6 +270,30 @@ def parse(text):
                 else: extra.append(ln)
             name = name or (p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1))
             materials[name] = Material(name, tex, color, extra, list(body))
+        elif k == 'physics':
+            body = read_raw_block()
+            name, linear, angular, slide, death = '', (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, ''
+            hl = ha = hs = hd = False; extra = []
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: name = q[1]
+                elif kk == 'linear':
+                    try: linear = tuple(float(a) for a in (q[1:4] + ['0', '0', '0'])[:3]); hl = True
+                    except ValueError: pass
+                elif kk == 'angular':
+                    try: angular = tuple(float(a) for a in (q[1:4] + ['0', '0', '0'])[:3]); ha = True
+                    except ValueError: pass
+                elif kk == 'slide':
+                    try: slide = float(q[1]); hs = True
+                    except (IndexError, ValueError): pass
+                elif kk == 'death':
+                    death = ' '.join(q[1:]); hd = True
+                else:
+                    extra.append(ln)
+            name = name or 'phydrv%d' % (len(physics) + 1)
+            physics[name] = PhysicsDriver(name, linear, angular, slide, death, hl, ha, hs, hd, extra, list(body))
         elif k == 'options':
             if not options_text: options_text = '\n'.join(read_raw_block())  # only once per map
             else: read_raw_block()
@@ -294,7 +340,7 @@ def parse(text):
             while i < len(lines):
                 if lines[i].split()[0].lower() == 'enddef': i += 1; break
                 sub.append(lines[i]); i += 1
-            _, kids, _, _, _, _ = parse('\n'.join(sub))
+            _, kids, _, _, _, _, _ = parse('\n'.join(sub))
             defines[name] = kids
         elif k == 'group':
             v = read_block()
@@ -302,7 +348,14 @@ def parse(text):
             x, y, z = nm(v.get('shift'), (0, 0, 0))
             r = nm(v.get('rotation'), (0,))[0]
             team = int(nm(v.get('team'), (0,))[0])
-            objs.append(Obj('group', x, y, z, 1, 1, 1, r, team, name))
+            go = Obj('group', x, y, z, 1, 1, 1, r, team, name)
+            if v.get('tint'): go.tint = tuple(nm(v['tint'], (1.0, 1.0, 1.0, 1.0)))
+            go.ricochet = 'ricochet' in v
+            hd, hs = 'drivethrough' in v, 'shootthrough' in v
+            go.phys = 'passable' if (hd and hs) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
+            go.matref = (v.get('matref') or [''])[0]
+            go.phydrv = (v.get('phydrv') or [''])[0]
+            objs.append(go)
         elif k in ('box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
             v = read_block()
             # Old maps often name a teleporter right on its opening line ('teleporter home')
@@ -314,6 +367,7 @@ def parse(text):
             team = int(nm(v.get('color'), (1,))[0])
             o = Obj(k, x, y, z, sx, sy, sz, r, team if 1 <= team <= 4 else 1, name)
             o.matref = (v.get('matref') or [''])[0]
+            o.phydrv = (v.get('phydrv') or [''])[0]
             for fk, _ in FACES.get(k, []):
                 vv = v.get(fk)
                 if vv and len(vv) >= 2 and vv[0].lower() == 'matref': o.mats[fk] = vv[1]
@@ -326,6 +380,7 @@ def parse(text):
             if k == 'pyramid': o.flipz = 'flipz' in v
             hd, hs, hp = 'drivethrough' in v, 'shootthrough' in v, 'passable' in v
             o.phys = 'passable' if (hp or (hd and hs)) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
+            o.ricochet = 'ricochet' in v
             objs.append(o)
         elif k in ('end', 'enddef'):
             continue  # stray terminator
@@ -362,7 +417,7 @@ def parse(text):
             if o.t == 'teleporter' and o.name == fn:
                 if fface == 'f': o.link = tn
                 elif fface == 'b': o.blink = tn
-    return nw, objs, materials, defines, extras, options_text
+    return nw, objs, materials, defines, extras, options_text, physics
 
 
 def obj_block(o):
@@ -383,6 +438,13 @@ def obj_block(o):
         ln = ['group %s' % o.name, '  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)),
               '  rotation %s' % num(o.r)]
         if o.team: ln.append('  team %d' % o.team)
+        if tuple(o.tint) != (1.0, 1.0, 1.0, 1.0): ln.append('  tint %s %s %s %s' % tuple(num(c) for c in o.tint))
+        if o.phys == 'passable': ln += ['  drivethrough', '  shootthrough']
+        elif o.phys == 'drivethrough': ln.append('  drivethrough')
+        elif o.phys == 'shootthrough': ln.append('  shootthrough')
+        if o.matref: ln.append('  matref %s' % o.matref)
+        if o.phydrv: ln.append('  phydrv %s' % o.phydrv)
+        if o.ricochet: ln.append('  ricochet')
         return ln + ['end']
     ln = [o.t]
     if o.t == 'teleporter' and o.name: ln.append('  name %s' % o.name)
@@ -396,6 +458,8 @@ def obj_block(o):
     if o.t == 'cone': ln.append('  divisions %d' % o.divisions)
     if o.t == 'pyramid' and o.flipz: ln.append('  flipz')
     if o.t in ('box', 'pyramid', 'arc', 'cone') and o.phys != 'normal': ln.append('  ' + o.phys)
+    if o.t in ('box', 'pyramid', 'arc', 'cone') and o.ricochet: ln.append('  ricochet')
+    if o.phydrv: ln.append('  phydrv %s' % o.phydrv)
     if o.matref: ln.append('  matref %s' % o.matref)
     if o.t in FACES and o.mats:
         # BZFlag ignores partial per-face lists on arcs, so unset arc faces fall back to the
@@ -415,6 +479,16 @@ def material_block(m):
     return ln + ['  ' + e for e in m.extra] + ['end']
 
 
+def physics_block(p):
+    if p.raw: return ['physics'] + ['  ' + b for b in p.raw] + ['end']  # untouched since import
+    ln = ['physics', '  name %s' % p.name]
+    if p.has_linear: ln.append('  linear %s %s %s' % tuple(num(c) for c in p.linear))
+    if p.has_angular: ln.append('  angular %s %s %s' % tuple(num(c) for c in p.angular))
+    if p.has_slide: ln.append('  slide %s' % num(p.slide))
+    if p.has_death: ln.append('  death %s' % p.death)
+    return ln + ['  ' + e for e in p.extra] + ['end']
+
+
 class Model(QObject):
     changed = pyqtSignal(); selected = pyqtSignal(); reset = pyqtSignal(); warn = pyqtSignal(str)
 
@@ -423,6 +497,7 @@ class Model(QObject):
         s.W, s.objs, s.sel, s.msel, s.undo, s.path = 400, [], None, [], [], None
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.options_text = ''
+        s.physics = {}
         s.nid, s.sym = 1, 0
         s.tool, s.snap = 'select', True
 
@@ -430,7 +505,7 @@ class Model(QObject):
         d = {'W': s.W, 'objs': [asdict(o) for o in s.objs],
              'materials': {k: asdict(v) for k, v in s.materials.items()},
              'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras,
-             'options_text': s.options_text}
+             'options_text': s.options_text, 'physics': {k: asdict(v) for k, v in s.physics.items()}}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -441,6 +516,7 @@ class Model(QObject):
         s.defines = {k: [Obj(**o) for o in v] for k, v in d['defines'].items()}
         s.extras = d.get('extras', [])
         s.options_text = d.get('options_text', '')
+        s.physics = {k: PhysicsDriver(**v) for k, v in d.get('physics', {}).items()}
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
 
@@ -529,7 +605,7 @@ class Model(QObject):
             q.zteam = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0team))
             z0safe = [_team_inv(o.fam_k, t, mode, fold) for t in o.zsafety]
             q.zsafety = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0safe))
-            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref'):
+            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref', 'phydrv', 'tint', 'ricochet'):
                 setattr(q, f, getattr(o, f))
             q.mats = dict(o.mats)
             if o.t in ('base', 'group'):  # team means something for these only -- everything
@@ -571,29 +647,39 @@ class Model(QObject):
             c.name = 't%d' % j
         s.objs.append(c); s.make_family(c); s.select(c); s.changed.emit()
 
-    def group_selection(s):
-        """Turn the multi-selected objects into a named prefab (a 'define') plus one
+    def make_group(s, objs, name_hint='group'):
+        """Wrap the given objects (at least one) into a new prefab ('define') plus one
         instance ('group') placed at their centroid -- BZFlag's group only stores a shift
-        and rotation, so the prefab's own contents are stored relative to that midpoint."""
-        objs = [o for o in s.msel if o.t != 'group'] or ([s.sel] if s.sel and s.sel.t != 'group' else [])
-        if len(objs) < 2: return None
-        s.push()
+        and rotation, so the prefab's own contents are stored relative to that midpoint.
+        Does not touch s.objs or undo; callers decide what to do with the result."""
+        if not objs: return None
         cx = sum(o.x for o in objs) / len(objs); cy = sum(o.y for o in objs) / len(objs)
         kids = []
         for o in objs:
             k = replace(o); k.x -= cx; k.y -= cy; k.fam = k.fam_k = k.fold = 0; k.mode = ''
             kids.append(k)
-        name = 'group%d' % (len(s.defines) + 1)
+        name, i = name_hint, 1
+        while name in s.defines: i += 1; name = '%s%d' % (name_hint, i)
         s.defines[name] = kids
-        s.objs = [o for o in s.objs if o not in objs]
         g = Obj('group', cx, cy, 0, 1, 1, 1, 0, 0, name); g.uid = s.nid; s.nid += 1
+        return g
+
+    def group_selection(s):
+        """Turn the selected object(s) into a group -- one is enough (useful for a tint or
+        a physics/material override that should apply to just this copy), though it's most
+        often used to bundle several objects together."""
+        objs = [o for o in s.msel if o.t != 'group'] or ([s.sel] if s.sel and s.sel.t != 'group' else [])
+        if not objs: return None
+        s.push()
+        g = s.make_group(objs)
+        s.objs = [o for o in s.objs if o not in objs]
         s.objs.append(g); s.msel = []; s.select(g); s.changed.emit()
-        return name
+        return g.name
 
     def load(s, text, folder=None):
-        nw, objs, materials, defines, extras, options_text = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics = parse(text)
         s.push(); s.W = nw or s.W; s.objs = objs; s.materials = materials; s.defines = defines
-        s.extras = extras; s.options_text = options_text
+        s.extras = extras; s.options_text = options_text; s.physics = physics
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
         s.texcache = {}
@@ -603,6 +689,7 @@ class Model(QObject):
         out = ['# Made with BZ Map Maker', 'world', '  size %s' % num(s.W), 'end', '']
         if s.options_text.strip():
             out += ['options'] + ['  ' + ln for ln in s.options_text.splitlines() if ln.strip()] + ['end', '']
+        for pd in s.physics.values(): out += physics_block(pd) + ['']
         for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
         for name, kids in s.defines.items():
@@ -781,6 +868,15 @@ class Editor(QWidget):
             if src in s.m.msel:
                 p.save(); p.translate(leaf.x, leaf.y)
                 p.setPen(cpen('#c8453b', 2)); p.drawEllipse(QPointF(0, 0), 3 / S, 3 / S); p.restore()
+        for leaf, src in expand(s.m):  # launch-pad landing points, top-down (no arc shape needed from above)
+            if not leaf.phydrv: continue
+            pd = s.m.physics.get(leaf.phydrv)
+            if not pd or not pd.has_linear or pd.linear[2] <= 0: continue
+            lx, ly = leaf.x + pd.linear[0] * (2 * pd.linear[2] / GRAVITY), leaf.y + pd.linear[1] * (2 * pd.linear[2] / GRAVITY)
+            p.setPen(cpen('#e0b84f', 1.5, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(leaf.x, leaf.y), QPointF(lx, ly))
+            p.setPen(cpen('#e0b84f', 2)); p.setBrush(QColor(224, 184, 79, 90))
+            p.drawEllipse(QPointF(lx, ly), 4 / S, 4 / S)
         d = s.drag
         if d and d[0] == 'make':
             (ax, ay), (bx, by) = d[1], d[2]; p.setPen(cpen(ACC, 1.5, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
@@ -920,6 +1016,25 @@ def ray_aabb_hit(origin, direction, bmin, bmax):
             tmin, tmax = max(tmin, t1), min(tmax, t2)
             if tmin > tmax: return None
     return None if tmax < 0 else max(tmin, 0)
+
+
+GRAVITY = 9.81  # matches the acceleration BZFlag's own documentation uses for its trampoline example
+
+
+def launch_trajectory(start, linear, steps=24):
+    """Where a tank launched from `start` (x, y, z) by a physics driver's `linear` velocity
+    would land, assuming it comes back down to the same height it launched from -- the usual
+    case for a trampoline or launch pad sitting on flat ground. Returns (points, landing) or
+    None if this driver doesn't launch anything upward (linear[2] <= 0) for there to be an
+    arc to show. `points` is a list of (x, y, z) samples along the parabola, in order."""
+    vx, vy, vz = linear
+    if vz <= 0: return None
+    t_total = 2 * vz / GRAVITY
+    pts = []
+    for i in range(steps + 1):
+        t = t_total * i / steps
+        pts.append((start[0] + vx * t, start[1] + vy * t, start[2] + vz * t - 0.5 * GRAVITY * t * t))
+    return pts, pts[-1]
 
 
 def raster_triangle(zbuf, cbuf, pts, depths, rgba):
@@ -1140,10 +1255,36 @@ class Preview(QWidget):
             if mark:
                 p.setPen(QPen(QColor('#c8453b'), 2)); p.setBrush(QColor('#c8453b'))
                 p.drawEllipse(mark, 5, 5)
+        s.draw_trajectories(p, B)
         p.setPen(QColor('#98a0a8'))
         p.drawText(10, s.height() - 10, 'Click/drag: select, move, place \u00b7 Shift+drag: rotate selected \u00b7 '
                                         'Right/middle-drag or Space+drag: orbit \u00b7 Scroll: zoom')
         s.draw_gizmo(p, B)
+
+    def draw_trajectories(s, p, B):
+        """For every object whose physics driver launches tanks upward, draw the predicted
+        flight path and landing point -- physically computed, not just a guess at direction."""
+        for leaf, src in expand(s.m):
+            if not leaf.phydrv: continue
+            pd = s.m.physics.get(leaf.phydrv)
+            if not pd or not pd.has_linear: continue
+            start = (leaf.x, leaf.y, leaf.z + max(leaf.sz, .3))
+            result = launch_trajectory(start, pd.linear)
+            if not result: continue
+            points, landing = result
+            screen = [s.proj(B, pt) for pt in points]
+            if any(pt is None for pt in screen): continue
+            path = QPainterPath(); path.moveTo(screen[0])
+            for pt in screen[1:]: path.lineTo(pt)
+            p.setPen(QPen(QColor('#e0b84f'), 2, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+            land = s.proj(B, landing)
+            if land:
+                p.setPen(QPen(QColor('#e0b84f'), 2)); p.setBrush(QColor(224, 184, 79, 90))
+                p.drawEllipse(land, 10, 10)
+                dist = math.hypot(landing[0] - leaf.x, landing[1] - leaf.y)
+                p.setPen(QColor('#e0b84f'))
+                p.drawText(land + QPointF(12, 4), '%.0f units' % dist)
 
     def draw_gizmo(s, p, B):
         """A small axis widget, fixed to a screen corner, that turns to match the current
@@ -1462,6 +1603,82 @@ class RadarHost(QWidget):
         s.corner = c; s.do_layout()
 
 
+class PhysicsDialog(QDialog):
+    def __init__(s, m):
+        super().__init__(); s.m, s.cur = m, None
+        s.setWindowTitle('Physics Drivers'); s.resize(480, 420)
+        root = QHBoxLayout(s)
+        s.list = QListWidget(); s.list.addItems(sorted(m.physics)); s.list.currentTextChanged.connect(s.pick)
+        root.addWidget(s.list, 1)
+        col = QVBoxLayout(); root.addLayout(col, 2)
+        s.name = QLineEdit()
+        form = QFormLayout(); form.addRow('Name', s.name)
+
+        s.use_lin = QCheckBox('Linear push (x y z) -- conveyors, trampolines')
+        lin = QHBoxLayout(); s.lx, s.ly, s.lz = QDoubleSpinBox(), QDoubleSpinBox(), QDoubleSpinBox()
+        for sp in (s.lx, s.ly, s.lz): sp.setRange(-500, 500); lin.addWidget(sp)
+        form.addRow(s.use_lin); form.addRow('  Linear x y z', lin)
+
+        s.use_ang = QCheckBox('Angular spin (rate, center x, center y) -- turntables')
+        ang = QHBoxLayout(); s.ar, s.acx, s.acy = QDoubleSpinBox(), QDoubleSpinBox(), QDoubleSpinBox()
+        s.ar.setRange(-50, 50); s.ar.setSingleStep(.1)
+        for sp in (s.acx, s.acy): sp.setRange(-5000, 5000)
+        for sp in (s.ar, s.acx, s.acy): ang.addWidget(sp)
+        form.addRow(s.use_ang); form.addRow('  Rate, center x, y', ang)
+
+        s.use_slide = QCheckBox('Slide -- a slippery surface (seconds to reach full speed)')
+        s.slide = QDoubleSpinBox(); s.slide.setRange(0, 60); s.slide.setSingleStep(.1)
+        form.addRow(s.use_slide); form.addRow('  Slide time', s.slide)
+
+        s.use_death = QCheckBox('Death message -- kills the tank on contact (e.g. a landmine)')
+        s.death = QLineEdit()
+        form.addRow(s.use_death); form.addRow('  Message', s.death)
+        col.addLayout(form)
+
+        for cb, fields in ((s.use_lin, (s.lx, s.ly, s.lz)), (s.use_ang, (s.ar, s.acx, s.acy)),
+                           (s.use_slide, (s.slide,)), (s.use_death, (s.death,))):
+            cb.toggled.connect(lambda v, fs=fields: [f.setEnabled(v) for f in fs])
+            for f in fields: f.setEnabled(False)
+
+        btns = QHBoxLayout()
+        add = QPushButton('Add / Update'); add.clicked.connect(s.save)
+        rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
+        btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
+        note = QLabel('Assign a driver to a box, pyramid, arc, or cone with its "Physics driver" '
+                      'field. Only the checked capabilities above are written to the file, so a '
+                      'driver that\'s just slippery (Slide) doesn\'t also push or spin anything.')
+        note.setWordWrap(True); col.addWidget(note); col.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
+        col.addWidget(bb)
+
+    def pick(s, name):
+        s.cur = s.m.physics.get(name)
+        if not s.cur: return
+        s.name.setText(s.cur.name)
+        s.use_lin.setChecked(s.cur.has_linear); s.lx.setValue(s.cur.linear[0]); s.ly.setValue(s.cur.linear[1]); s.lz.setValue(s.cur.linear[2])
+        s.use_ang.setChecked(s.cur.has_angular); s.ar.setValue(s.cur.angular[0]); s.acx.setValue(s.cur.angular[1]); s.acy.setValue(s.cur.angular[2])
+        s.use_slide.setChecked(s.cur.has_slide); s.slide.setValue(s.cur.slide)
+        s.use_death.setChecked(s.cur.has_death); s.death.setText(s.cur.death)
+
+    def save(s):
+        name = s.name.text().strip()
+        if not name: return
+        old = s.m.physics.get(name)
+        pd = PhysicsDriver(name, (s.lx.value(), s.ly.value(), s.lz.value()), (s.ar.value(), s.acx.value(), s.acy.value()),
+                           s.slide.value(), s.death.text(), s.use_lin.isChecked(), s.use_ang.isChecked(),
+                           s.use_slide.isChecked(), s.use_death.isChecked(), list(old.extra) if old else [])
+        s.m.physics[name] = pd
+        if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
+        s.m.changed.emit()
+
+    def remove(s):
+        name = s.name.text().strip()
+        if name in s.m.physics:
+            del s.m.physics[name]
+            for it in s.list.findItems(name, Qt.MatchFlag.MatchExactly): s.list.takeItem(s.list.row(it))
+            s.m.changed.emit()
+
+
 class Win(QMainWindow):
     FIELDS = (('x', 'X'), ('y', 'Y'), ('z', 'Z'), ('sx', 'Half-width X'), ('sy', 'Half-width Y'),
               ('sz', 'Height'), ('r', 'Rotation'))
@@ -1513,6 +1730,7 @@ class Win(QMainWindow):
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
         s.act(ob, 'Map Options...', s.open_options)
+        s.act(ob, 'Physics Drivers...', s.open_physics)
         vw = s.menuBar().addMenu('&View')
         lg = QActionGroup(s); cur_mode = s.settings.value('layoutMode', 'split')
         split_a = QAction('Side by Side', s); split_a.setCheckable(True); split_a.setChecked(cur_mode != 'radar')
@@ -1554,6 +1772,8 @@ class Win(QMainWindow):
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
         s.mat = QComboBox(); s.mat.setEditable(True); s.mat.currentTextChanged.connect(lambda t: s.edit('matref', t))
+        s.phydrv_combo = QComboBox(); s.phydrv_combo.setEditable(True)
+        s.phydrv_combo.currentTextChanged.connect(lambda t: s.edit('phydrv', t))
         s.flip = QCheckBox('Flip (point down)'); s.flip.toggled.connect(lambda v: s.edit('flipz', v))
         s.phys = QComboBox(); s.phys.addItems(['Normal', 'Drivethrough', 'Shootthrough', 'Passable'])
         s.phys.currentIndexChanged.connect(lambda i: s.edit('phys', ['normal', 'drivethrough', 'shootthrough', 'passable'][i]))
@@ -1564,10 +1784,19 @@ class Win(QMainWindow):
         s.zflags = QPlainTextEdit(); s.zflags.setMaximumHeight(90)
         s.zflags.setPlaceholderText("one per line, e.g.:\nflag L\nzoneflag GM 2\nSee bzflag.org/documentation/flags")
         s.zflags.textChanged.connect(lambda: s.edit('zflags', s.zflags.toPlainText()))
+        s.ricochet = QCheckBox('Ricochet (shots always bounce off)')
+        s.ricochet.toggled.connect(lambda v: s.edit('ricochet', v))
+        s.tintc = {}
+        s.tint_widget = QWidget(); trow = QHBoxLayout(s.tint_widget); trow.setContentsMargins(0, 0, 0, 0)
+        for ch in ('R', 'G', 'B', 'A'):
+            b = QDoubleSpinBox(); b.setRange(0, 1); b.setSingleStep(.05); b.setValue(1)
+            b.valueChanged.connect(lambda v, ch=ch: s.edit_tint(ch, v))
+            trow.addWidget(QLabel(ch)); trow.addWidget(b); s.tintc[ch] = b
         fl.addRow('Team', s.team); fl.addRow('Group team override', s.gteam); fl.addRow('Group prefab', s.gname)
         fl.addRow('Front links to', s.link); fl.addRow('Back links to', s.blink)
         fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
-        fl.addRow(s.flip); fl.addRow('Passability', s.phys)
+        fl.addRow(s.flip); fl.addRow('Passability', s.phys); fl.addRow(s.ricochet)
+        fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('Group tint (RGBA)', s.tint_widget)
         fl.addRow('Spawn teams', s.zteam); fl.addRow('Safety for teams', s.zsafety); fl.addRow('Flags', s.zflags)
         fl.addRow('Material (all faces)', s.mat)
         s.face = {}
@@ -1657,6 +1886,13 @@ class Win(QMainWindow):
         else: o.mats.pop(k, None)
         s.m.sync_family(o); s.busy = True; s.m.changed.emit(); s.busy = False
 
+    def edit_tint(s, ch, v):
+        o = s.m.sel
+        if s.busy or not o: return
+        if not s.pushed: s.m.push(); s.pushed = True
+        i = 'RGBA'.index(ch); t = list(o.tint); t[i] = v; o.tint = tuple(t)
+        s.m.sync_family(o); s.busy = True; s.m.changed.emit(); s.busy = False
+
     def on_select(s):
         s.pushed = False; s.refresh()
 
@@ -1672,13 +1908,16 @@ class Win(QMainWindow):
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
                 'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'flip': o and o.t == 'pyramid',
                 'phys': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'zteam': o and o.t == 'zone',
-                'zsafety': o and o.t == 'zone', 'zflags': o and o.t == 'zone'}
+                'zsafety': o and o.t == 'zone', 'zflags': o and o.t == 'zone',
+                'ricochet': o and o.t in ('box', 'pyramid', 'arc', 'cone', 'group'),
+                'phydrv_combo': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'tintrow': o and o.t == 'group'}
         for name, vis in rows.items():
             widget = {'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'link': s.link, 'blink': s.blink, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
-                      'zflags': s.zflags}[name]
+                      'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
+                      'tintrow': s.tint_widget}[name]
             row = s.dock.widget().layout().labelForField(widget)
             widget.setVisible(bool(vis))
             if row: row.setVisible(bool(vis))
@@ -1706,6 +1945,9 @@ class Win(QMainWindow):
             s.flip.setChecked(o.flipz if o.t == 'pyramid' else False)
             s.phys.setCurrentIndex(['normal', 'drivethrough', 'shootthrough', 'passable'].index(o.phys)
                                     if o.phys in ('normal', 'drivethrough', 'shootthrough', 'passable') else 0)
+            s.ricochet.setChecked(o.ricochet)
+            s.phydrv_combo.clear(); s.phydrv_combo.addItems([''] + sorted(s.m.physics)); s.phydrv_combo.setCurrentText(o.phydrv)
+            for ch, b in s.tintc.items(): b.setValue(o.tint['RGBA'.index(ch)] if o.t == 'group' else 1.0)
             s.zteam.setText(' '.join(str(t) for t in o.zteam) if o.t == 'zone' else '')
             s.zsafety.setText(' '.join(str(t) for t in o.zsafety) if o.t == 'zone' else '')
             s.zflags.setPlainText(o.zflags if o.t == 'zone' else '')
@@ -1725,13 +1967,16 @@ class Win(QMainWindow):
 
     def do_group(s):
         if not s.m.group_selection():
-            QMessageBox.information(s, 'Group', 'Ctrl+click at least two objects in the layout view first.')
+            QMessageBox.information(s, 'Group', 'Select an object first (click it, or Ctrl+click several).')
 
     def open_materials(s):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
     def open_options(s):
         OptionsDialog(s.m).exec()
+
+    def open_physics(s):
+        PhysicsDialog(s.m).exec()
 
     def import_mesh(s):
         """Pull one or more 'mesh ... end' objects out of another .bzw (or a file that's
@@ -1743,17 +1988,22 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Import failed', str(e)); return
-        nw, objs, materials, defines, extras, options_text = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics = parse(text)
         meshes = [o for o in objs if o.t == 'mesh']
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
         s.m.push()
         for mo in meshes:
             mo.uid = s.m.nid; s.m.nid += 1
-            s.m.objs.append(mo)
+        # Wrapped in a group rather than added as loose top-level meshes: a mesh is often the
+        # single biggest thing in a .bzw file, and duplicating it (e.g. with symmetry) would
+        # otherwise copy its entire geometry every time. A group only copies a position and a
+        # rotation per instance -- the prefab itself (and the mesh data) is stored once.
+        g = s.m.make_group(meshes, 'mesh-group')
+        s.m.objs.append(g)
         for name, mat in materials.items():  # bring along any materials the mesh's faces refer to
             s.m.materials.setdefault(name, mat)
-        s.m.select(meshes[-1]); s.m.changed.emit()
+        s.m.select(g); s.m.changed.emit()
         skipped = len(objs) - len(meshes)
         msg = 'Imported %d mesh object%s from %s.' % (len(meshes), '' if len(meshes) == 1 else 's', os.path.basename(path))
         if skipped: msg += ' (%d other object%s in that file %s not imported.)' % (skipped, '' if skipped == 1 else 's', 'was' if skipped == 1 else 'were')
