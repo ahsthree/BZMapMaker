@@ -21,11 +21,12 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDoc
 # Data model
 # ---------------------------------------------------------------------------
 DEF = {'box': (10, 10, 9.4), 'pyramid': (8.2, 8.2, 8.2), 'base': (20, 20, 0),
-       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0), 'zone': (10, 10, 1)}
+       'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0),
+       'zone': (10, 10, 1), 'weapon': (0, 0, 0)}
 TEAM = ['', '#c8453b', '#3c9a5a', '#3a6fc4', '#8a55b5']
 TEAM_NAMES = ['', 'Red', 'Green', 'Blue', 'Purple']
 COL = {'box': '#8d939a', 'pyramid': '#b08a4e', 'teleporter': '#d0702a', 'arc': '#5c8a7a',
-       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8', 'zone': '#6b7280'}
+       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8', 'zone': '#6b7280', 'weapon': '#e0702a'}
 TSWAP = {1: 2, 2: 1, 3: 4, 4: 3}  # fixed pairing used by 2-fold symmetry: red<->green, blue<->purple
 # index -> (mode, fold). mode 'rot' = N-way rotation about the world center; the two mirror
 # modes are always a simple left-right or top-bottom reflection (fold is always 2 for those).
@@ -44,6 +45,18 @@ def zone_colors(o):
     no team is set (e.g. a zone that only exists to drop flags in, not to spawn players)."""
     teams = sorted(set(t for t in o.zteam if 0 <= t <= 4))
     return [ZONE_TEAM_COLORS[t] for t in teams] if teams else [COL['zone']]
+
+
+def zone_grid(sx, sy, target=8.0, min_cell=8.0, max_cells=16):
+    """How a zone's footprint splits into checkerboard cells for both views. Cell size
+    GROWS with the zone instead of staying fixed, so the total cell count stays bounded no
+    matter how large the zone is -- a big zone gets coarser tiles, not thousands of tiny
+    ones. Without this, a large zone could generate several thousand tiny triangles that
+    the 3D view's per-pixel rasterizer has to redo on every single repaint."""
+    cell = max(min_cell, min(2 * sx, 2 * sy) / target)
+    nx = max(1, min(max_cells, round(2 * sx / cell)))
+    ny = max(1, min(max_cells, round(2 * sy / cell)))
+    return nx, ny, 2 * sx / nx, 2 * sy / ny
 
 
 ACC = QColor('#0f6b6b')
@@ -67,6 +80,11 @@ class Obj:
     zsafety: list = field(default_factory=list) # zone only: team flags (1-4) that fly here when dropped
     zflags: str = ''  # zone only: raw 'flag X' / 'zoneflag X N' lines, one per line, written verbatim
     divisions: int = 16; angle: float = 360.0; ratio: float = 0.0  # arc / cone only
+    wcolor: int = 0  # weapon only: 0 rogue..4 purple, 5 observer, 6 rabbit
+    tilt: float = 0.0  # weapon only: vertical aim angle, independent of horizontal rotation
+    initdelay: float = 0.0; delay: list = field(default_factory=list)  # weapon only: fire timing
+    wtype: str = ''  # weapon only: flag abbreviation of what it fires, e.g. SW
+    trigger: str = ''; eventteam: int = 1  # weapon only: '' or 'oncap', and which team's cap fires it
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
 
@@ -127,6 +145,24 @@ def _inv(k, x, y, r, mode, fold):
     if mode in ('mirror_lr', 'mirror_tb') and k == 1:
         return _xform(1, x, y, r, mode, fold)  # these reflections are their own inverse
     return x, y, r
+
+
+def _xform_vec(k, v, mode, fold):
+    """Same rotation/mirror as _xform, but for a direction (e.g. a physics driver's push
+    velocity) rather than a position -- no translation, since a direction has no location."""
+    x, y, z = v
+    if mode == 'rot' and k:
+        a = math.radians(k * 360.0 / fold); c, s = math.cos(a), math.sin(a)
+        return (x * c - y * s, x * s + y * c, z)
+    if mode == 'mirror_lr' and k == 1: return (-x, y, z)
+    if mode == 'mirror_tb' and k == 1: return (x, -y, z)
+    return (x, y, z)
+
+
+def _inv_vec(k, v, mode, fold):
+    if mode == 'rot' and k: return _xform_vec((-k) % fold, v, mode, fold)
+    if mode in ('mirror_lr', 'mirror_tb') and k == 1: return _xform_vec(1, v, mode, fold)
+    return v
 
 
 def _team_fwd(k, team, mode, fold):
@@ -213,8 +249,25 @@ def parse(text):
     """Read world, box, pyramid, base, teleporter, arc, cone, mesh, material, define/group
     and link blocks. Meshes and materials keep their original text; any other block
     (physics, zones, dynamic colors...) is returned verbatim in `extras` so it isn't lost."""
-    lines = [ln.split('#', 1)[0].rstrip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln.strip()]
+    # A '#bzmm-sym ...' comment is BZ Map Maker's own marker, recording which symmetry family
+    # the object on the next line belonged to when saved -- plain BZFlag and every other tool
+    # sees only an ordinary ignorable comment, but this editor uses it to restore symmetry
+    # linkage that the base .bzw format has no other way to express. metas[i] holds the
+    # marker (if any) for lines[i], the object block it immediately precedes.
+    lines, metas = [], []
+    pending = None
+    for raw in text.splitlines():
+        code, _, comment = raw.partition('#')
+        comment = comment.strip()
+        if comment.startswith('bzmm-sym'):
+            pending = {}
+            for kv in comment[len('bzmm-sym'):].split():
+                if '=' in kv:
+                    kk, vv = kv.split('=', 1); pending[kk] = vv
+            continue
+        code = code.rstrip()
+        if not code.strip(): continue
+        lines.append(code); metas.append(pending); pending = None
     i = 0
     nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
@@ -227,6 +280,15 @@ def parse(text):
             try: out.append(float(a[idx]))
             except Exception: out.append(val)
         return out
+
+    def apply_meta(o, meta):
+        if not meta: return
+        o.fam = meta.get('fam', '')
+        try: o.fam_k = int(meta.get('k', 0))
+        except ValueError: pass
+        try: o.fold = int(meta.get('fold', 0))
+        except ValueError: pass
+        o.mode = meta.get('mode', '')
 
     def read_block():
         nonlocal i
@@ -251,7 +313,7 @@ def parse(text):
         return body
 
     while i < len(lines):
-        p = lines[i].split(); i += 1
+        line_meta = metas[i]; p = lines[i].split(); i += 1
         k = p[0].lower()
         if k == 'world':
             v = read_block()
@@ -331,7 +393,45 @@ def parse(text):
                         except ValueError: pass
             zo = Obj('zone', zx, zy, zz, zsx, zsy, zsz, zr, 1, name)
             zo.zflags = '\n'.join(zflags); zo.zteam = zteam; zo.zsafety = zsafety
+            apply_meta(zo, line_meta)
             objs.append(zo)
+        elif k == 'weapon':
+            body = read_raw_block()
+            name = ''; wx = wy = wz = 0.0; wr = 0.0; wcolor = 0; tilt = 0.0
+            initdelay = 0.0; delay = []; wtype = ''; trigger = ''; eventteam = 1
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: name = q[1]
+                elif kk in ('position', 'pos'):
+                    try: wx, wy, wz = (float(a) for a in q[1:4])
+                    except Exception: pass
+                elif kk in ('rotation', 'rot'):
+                    try: wr = float(q[1])
+                    except Exception: pass
+                elif kk == 'color':
+                    try: wcolor = int(float(q[1]))
+                    except Exception: pass
+                elif kk == 'tilt':
+                    try: tilt = float(q[1])
+                    except Exception: pass
+                elif kk == 'initdelay':
+                    try: initdelay = float(q[1])
+                    except Exception: pass
+                elif kk == 'delay':
+                    try: delay = [float(a) for a in q[1:]]
+                    except Exception: pass
+                elif kk == 'type' and len(q) > 1: wtype = q[1]
+                elif kk == 'trigger' and len(q) > 1: trigger = q[1].lower()
+                elif kk == 'eventteam':
+                    try: eventteam = int(float(q[1]))
+                    except Exception: pass
+            wo = Obj('weapon', wx, wy, wz, 0, 0, 0, wr, 1, name)
+            wo.wcolor, wo.tilt, wo.initdelay = wcolor, tilt, initdelay
+            wo.delay, wo.wtype, wo.trigger, wo.eventteam = delay, wtype, trigger, eventteam
+            apply_meta(wo, line_meta)
+            objs.append(wo)
         elif k == 'link':
             v = read_block(); links.append(((v.get('from') or [''])[0], (v.get('to') or [''])[0]))
         elif k == 'define':
@@ -355,6 +455,7 @@ def parse(text):
             go.phys = 'passable' if (hd and hs) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
             go.matref = (v.get('matref') or [''])[0]
             go.phydrv = (v.get('phydrv') or [''])[0]
+            apply_meta(go, line_meta)
             objs.append(go)
         elif k in ('box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
             v = read_block()
@@ -381,6 +482,7 @@ def parse(text):
             hd, hs, hp = 'drivethrough' in v, 'shootthrough' in v, 'passable' in v
             o.phys = 'passable' if (hp or (hd and hs)) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
             o.ricochet = 'ricochet' in v
+            apply_meta(o, line_meta)
             objs.append(o)
         elif k in ('end', 'enddef'):
             continue  # stray terminator
@@ -429,6 +531,18 @@ def obj_block(o):
         ln += ['  ' + fl for fl in o.zflags.splitlines() if fl.strip()]
         if o.zteam: ln.append('  team ' + ' '.join(str(t) for t in o.zteam))
         if o.zsafety: ln.append('  safety ' + ' '.join(str(t) for t in o.zsafety))
+        return ln + ['end']
+    if o.t == 'weapon':
+        ln = ['weapon']
+        if o.name: ln.append('  name %s' % o.name)
+        ln += ['  position %s %s %s' % (num(o.x), num(o.y), num(o.z)), '  rotation %s' % num(o.r)]
+        if o.wcolor: ln.append('  color %d' % o.wcolor)
+        if o.tilt: ln.append('  tilt %s' % num(o.tilt))
+        if o.initdelay: ln.append('  initdelay %s' % num(o.initdelay))
+        if o.delay: ln.append('  delay ' + ' '.join(num(d) for d in o.delay))
+        if o.wtype: ln.append('  type %s' % o.wtype)
+        if o.trigger: ln.append('  trigger %s' % o.trigger)
+        if o.trigger == 'oncap': ln.append('  eventteam %d' % o.eventteam)
         return ln + ['end']
     if o.t == 'mesh':
         ln = ['mesh'] + ['  ' + b for b in MESHDATA.get(o.mesh, [])]
@@ -605,9 +719,13 @@ class Model(QObject):
             q.zteam = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0team))
             z0safe = [_team_inv(o.fam_k, t, mode, fold) for t in o.zsafety]
             q.zsafety = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0safe))
-            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'matref', 'phydrv', 'tint', 'ricochet'):
+            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions'):
                 setattr(q, f, getattr(o, f))
-            q.mats = dict(o.mats)
+            # matref, mats, phydrv, tint and ricochet are deliberately NOT copied here: each
+            # symmetry copy keeps its own material, physics driver, tint and ricochet, so a
+            # red-team copy can be red and push +X while a green-team copy is green and
+            # pushes -X, without one overwriting the other. See match_team_color() and
+            # mirror_physics_for_family() for ways to set those per-copy values quickly.
             if o.t in ('base', 'group'):  # team means something for these only -- everything
                 q.team = _team_fwd(q.fam_k, team0, mode, fold)  # else keeps its untouched default
         if o.t == 'teleporter' and o.mode in ('mirror_lr', 'mirror_tb'):
@@ -621,6 +739,36 @@ class Model(QObject):
 
     def family_of(s, o):
         return [q for q in s.objs if o.fam and q.fam == o.fam]
+
+    def match_team_color(s, o):
+        """Tint this one symmetry copy to the team color its position in the rotation
+        corresponds to (red/green/blue/purple) -- a quick way to color-code a symmetric set
+        by team without having to pick the RGB values yourself. Only meaningful for rot
+        fold>=3, where each sibling already maps to a distinct team the way a base's team
+        does; for 2-fold/mirror modes team pairing is red<->green or blue<->purple, so this
+        uses whichever of those the sibling's position swaps to."""
+        if not o.fam: return
+        team = o.fam_k + 1 if (o.mode == 'rot' and o.fold >= 3) else (1 if o.fam_k == 0 else 2)
+        team = min(4, max(1, team))
+        c = ZONE_TEAM_COLORS[team]
+        o.tint = (int(c[1:3], 16) / 255, int(c[3:5], 16) / 255, int(c[5:7], 16) / 255, 1.0)
+
+    def mirror_physics_for_family(s, o):
+        """Give every other sibling its own physics driver, derived from this one's, with
+        the push direction rotated/mirrored to match that sibling's own orientation -- so a
+        +X launch on one copy becomes a correctly mirrored -X (or rotated) launch on the
+        others, instead of every copy pushing the exact same absolute direction."""
+        if not o.fam or not o.phydrv or o.phydrv not in s.physics: return
+        src = s.physics[o.phydrv]  # o's own CURRENT driver -- the one we recover "canonical" from
+        base_name = src.name.rsplit('_f', 1)[0] if '_f' in src.name else src.name
+        v0 = _inv_vec(o.fam_k, src.linear, o.mode, o.fold) if src.has_linear else (0, 0, 0)
+        for q in s.family_of(o):
+            if q is o: continue  # never touches o's own driver, or any driver used elsewhere on the map
+            pd = replace(src)
+            pd.name = '%s_f%d' % (base_name, q.fam_k)
+            if src.has_linear: pd.linear = _xform_vec(q.fam_k, v0, o.mode, o.fold)
+            s.physics[pd.name] = pd
+            q.phydrv = pd.name
 
     def delete(s):
         if not s.sel: return
@@ -664,17 +812,42 @@ class Model(QObject):
         g = Obj('group', cx, cy, 0, 1, 1, 1, 0, 0, name); g.uid = s.nid; s.nid += 1
         return g
 
+    def add_to_group(s, grp, obj):
+        """Move an existing top-level object into an existing group's prefab, converting
+        its position into the group's local frame (undoing the group's own shift/rotation)
+        so it doesn't visually move. Returns False if either argument isn't valid for this."""
+        if grp.t != 'group' or obj.t == 'group' or obj is grp or obj not in s.objs: return False
+        a = math.radians(-grp.r); c, sn = math.cos(a), math.sin(a)
+        dx, dy = obj.x - grp.x, obj.y - grp.y
+        kid = replace(obj)
+        kid.x, kid.y, kid.z = dx * c - dy * sn, dx * sn + dy * c, obj.z - grp.z
+        kid.r = (obj.r - grp.r) % 360
+        kid.fam = kid.fam_k = kid.fold = 0; kid.mode = ''
+        s.defines.setdefault(grp.name, []).append(kid)
+        s.objs.remove(obj)
+        return True
+
     def group_selection(s):
-        """Turn the selected object(s) into a group -- one is enough (useful for a tint or
-        a physics/material override that should apply to just this copy), though it's most
-        often used to bundle several objects together."""
-        objs = [o for o in s.msel if o.t != 'group'] or ([s.sel] if s.sel and s.sel.t != 'group' else [])
-        if not objs: return None
+        """Ctrl+G. If exactly one of the selected objects is already a group, everything
+        else selected is added into it. Otherwise each selected object becomes its own new
+        group -- one object per group by default, so each copy can carry its own independent
+        tint, material, or physics driver without a shared prefab forcing them to match."""
+        sel = s.msel or ([s.sel] if s.sel else [])
+        groups = [o for o in sel if o.t == 'group']; plain = [o for o in sel if o.t != 'group']
+        if not sel: return None
         s.push()
-        g = s.make_group(objs)
-        s.objs = [o for o in s.objs if o not in objs]
-        s.objs.append(g); s.msel = []; s.select(g); s.changed.emit()
-        return g.name
+        if len(groups) == 1 and plain:
+            g = groups[0]
+            for o in plain: s.add_to_group(g, o)
+            s.msel = []; s.select(g); s.changed.emit()
+            return g.name
+        if not plain: return None
+        made = []
+        for o in plain:
+            g = s.make_group([o])
+            s.objs.remove(o); s.objs.append(g); made.append(g)
+        s.msel = []; s.select(made[-1]); s.changed.emit()
+        return made[-1].name
 
     def load(s, text, folder=None):
         nw, objs, materials, defines, extras, options_text, physics = parse(text)
@@ -696,7 +869,11 @@ class Model(QObject):
             out.append('define %s' % name)
             for kd in kids: out += ['  ' + ln for ln in obj_block(kd)]
             out += ['enddef', '']
-        for o in s.objs: out += obj_block(o) + ['']
+        for o in s.objs:
+            if o.fam:  # a plain, harmless comment to everything else that reads this file --
+                       # only this editor looks for it, to restore symmetry linkage on reopen
+                out.append('#bzmm-sym fam=%s k=%d fold=%d mode=%s' % (o.fam, o.fam_k, o.fold, o.mode))
+            out += obj_block(o) + ['']
         for o in s.objs:
             if o.t == 'teleporter':
                 for face, tgt, other in (('f', o.link, 'b'), ('b', o.blink, 'f')):
@@ -743,7 +920,10 @@ HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select 
         'cone': 'Drag corner to corner, or click for a default cone.',
         'zone': 'Drag corner to corner, or click for a default zone. Set spawn teams, safety teams and '
                 'flags in the panel -- zones are invisible in the real game, shown here as a checkered '
-                'aid colored by which teams spawn there.'}
+                'aid colored by which teams spawn there.',
+        'weapon': 'Click to place a world weapon. Rotation sets its aim direction, Tilt its vertical aim; '
+                  'set what it fires and how often in the panel. Shown here as an arrow, since it has no '
+                  'appearance in the real game either.'}
 
 
 class Editor(QWidget):
@@ -774,6 +954,7 @@ class Editor(QWidget):
                 continue
             hx, hy = (max(leaf.sx, leaf.sy, 5) if leaf.t == 'group' else leaf.sx), leaf.sy
             if leaf.t == 'group': hx, hy = s.m.group_bounds(leaf.name)
+            elif leaf.t == 'weapon': hx, hy = 14, 6  # matches the arrow marker's drawn extent
             a = math.radians(leaf.r); dx, dy = wx - leaf.x, wy - leaf.y
             lx = dx * math.cos(a) + dy * math.sin(a); ly = -dx * math.sin(a) + dy * math.cos(a)
             if abs(lx) <= max(hx, 1) + pad and abs(ly) <= hy + pad: return src
@@ -814,16 +995,21 @@ class Editor(QWidget):
             # Zones are invisible in the actual game -- this checkerboard is an editor aid only,
             # one color per spawning team (0=rogue=black), so you can see coverage at a glance.
             colors = zone_colors(leaf)
-            cell = max(2.0, min(10.0, min(leaf.sx, leaf.sy) / 2 or 2.0))
-            nx = max(1, round(2 * leaf.sx / cell)); ny = max(1, round(2 * leaf.sy / cell))
-            cw, ch = 2 * leaf.sx / nx, 2 * leaf.sy / ny
+            nx, ny, cw, ch = zone_grid(leaf.sx, leaf.sy)
             p.setPen(Qt.PenStyle.NoPen)
             for ix in range(nx):
                 for iy in range(ny):
-                    col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(160)
+                    col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(100)
                     p.setBrush(col); p.drawRect(QRectF(-leaf.sx + ix * cw, -leaf.sy + iy * ch, cw, ch))
             p.setPen(cpen('#22262b', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
+        elif leaf.t == 'weapon':
+            # Weapons have no appearance in the real game either -- an arrow along the
+            # rotation (already applied above via p.rotate) shows aim direction at a glance.
+            c = QColor(TEAM[leaf.wcolor] if 1 <= leaf.wcolor <= 4 else COL['weapon'])
+            p.setPen(cpen(c, 2.5)); p.drawLine(QPointF(0, 0), QPointF(14, 0))
+            p.drawLine(QPointF(14, 0), QPointF(9, 4)); p.drawLine(QPointF(14, 0), QPointF(9, -4))
+            p.setBrush(c); p.drawEllipse(QPointF(0, 0), 3, 3)
         else:
             a, b = max(leaf.sx, 1.2 / S if leaf.t == 'teleporter' else 0), leaf.sy
             c = QColor(TEAM[leaf.team] if leaf.t == 'base' else COL[leaf.t])
@@ -835,8 +1021,8 @@ class Editor(QWidget):
                     p.setBrush(QColor('#22262b')); p.drawEllipse(QPointF(0, 0), min(a, b) * .18, min(a, b) * .18)
         if sel:
             pad = 3 / S
-            hx = s.m.group_bounds(leaf.name)[0] if leaf.t == 'group' else max(leaf.sx, 1)
-            hy = s.m.group_bounds(leaf.name)[1] if leaf.t == 'group' else leaf.sy
+            hx = s.m.group_bounds(leaf.name)[0] if leaf.t == 'group' else (14 if leaf.t == 'weapon' else max(leaf.sx, 1))
+            hy = s.m.group_bounds(leaf.name)[1] if leaf.t == 'group' else (6 if leaf.t == 'weapon' else leaf.sy)
             p.setPen(cpen(ACC, 2.5, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(QRectF(-hx - pad, -hy - pad, 2 * hx + 2 * pad, 2 * hy + 2 * pad))
         p.restore()
@@ -1144,13 +1330,11 @@ class Preview(QWidget):
         than a solid box, to make clear it isn't real geometry. Reuses the existing flat-color
         rasterizer by subdividing into small flat cells instead of needing real texture support."""
         colors = zone_colors(o)
-        cell = max(2.0, min(10.0, min(o.sx, o.sy) / 2 or 2.0))
-        nx = max(1, round(2 * o.sx / cell)); ny = max(1, round(2 * o.sy / cell))
-        cw, ch = 2 * o.sx / nx, 2 * o.sy / ny
+        nx, ny, cw, ch = zone_grid(o.sx, o.sy)
         F = []
         for ix in range(nx):
             for iy in range(ny):
-                col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(170)
+                col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(110)
                 x0, y0 = -o.sx + ix * cw, -o.sy + iy * ch
                 quad = [P(x0, y0, ztop), P(x0 + cw, y0, ztop), P(x0 + cw, y0 + ch, ztop), P(x0, y0 + ch, ztop)]
                 F.append((quad, col, o, None))
@@ -1256,10 +1440,24 @@ class Preview(QWidget):
                 p.setPen(QPen(QColor('#c8453b'), 2)); p.setBrush(QColor('#c8453b'))
                 p.drawEllipse(mark, 5, 5)
         s.draw_trajectories(p, B)
+        s.draw_weapons(p, B)
         p.setPen(QColor('#98a0a8'))
         p.drawText(10, s.height() - 10, 'Click/drag: select, move, place \u00b7 Shift+drag: rotate selected \u00b7 '
                                         'Right/middle-drag or Space+drag: orbit \u00b7 Scroll: zoom')
         s.draw_gizmo(p, B)
+
+    def draw_weapons(s, p, B):
+        """Weapons have no appearance in the real game -- an arrow along the aim direction
+        (rotation, tilted by the vertical aim) shows where it actually points."""
+        for leaf, src in expand(s.m):
+            if leaf.t != 'weapon': continue
+            a = math.radians(leaf.r); t = math.radians(leaf.tilt); L = 25
+            tip = (leaf.x + L * math.cos(a) * math.cos(t), leaf.y + L * math.sin(a) * math.cos(t), leaf.z + L * math.sin(t))
+            base, tipscr = s.proj(B, (leaf.x, leaf.y, leaf.z)), s.proj(B, tip)
+            if not base or not tipscr: continue
+            c = QColor(TEAM[leaf.wcolor] if 1 <= leaf.wcolor <= 4 else COL['weapon'])
+            p.setPen(QPen(c, 2.5)); p.drawLine(base, tipscr)
+            p.setBrush(c); p.drawEllipse(base, 4, 4)
 
     def draw_trajectories(s, p, B):
         """For every object whose physics driver launches tanks upward, draw the predicted
@@ -1334,7 +1532,9 @@ class Preview(QWidget):
                 bmax = tuple(max(v[i] for v in W) for i in range(3))
                 t = ray_aabb_hit(origin, direction, bmin, bmax)
             else:
-                hx, hy = s.m.group_bounds(leaf.name) if leaf.t == 'group' else (leaf.sx, leaf.sy)
+                if leaf.t == 'group': hx, hy = s.m.group_bounds(leaf.name)
+                elif leaf.t == 'weapon': hx, hy = 14, 6  # matches the arrow marker's drawn extent
+                else: hx, hy = leaf.sx, leaf.sy
                 t = ray_box_hit(origin, direction, leaf.x, leaf.y, leaf.z, hx, hy, leaf.sz, leaf.r)
             if t is not None and (best_t is None or t < best_t): best, best_t = src, t
         return best
@@ -1689,7 +1889,7 @@ class Win(QMainWindow):
         s.split_widget = QSplitter(); s.radar_widget = RadarHost()
         s.settings = QSettings('BZMapMaker', 'BZMapMaker')
         s.recent = [p for p in s.settings.value('recentFiles', []) or [] if isinstance(p, str)]
-        s.busy = s.pushed = False; s.build_menus(); s.build_panel(); s.statusBar()
+        s.busy = s.pushed = False; s.editing_member = None; s.build_menus(); s.build_panel(); s.statusBar()
         s.m.selected.connect(s.on_select); s.m.changed.connect(s.refresh)
         s.m.warn.connect(lambda msg: s.statusBar().showMessage(msg, 8000))
         s.radar_widget.set_corner(s.settings.value('radarCorner', 'tl'))
@@ -1743,7 +1943,7 @@ class Win(QMainWindow):
             ca = QAction(label, s); ca.setCheckable(True); ca.setChecked(key == cur_corner)
             ca.triggered.connect(lambda _, k=key: s.set_corner(k)); cg.addAction(ca); cm.addAction(ca)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
-        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone'):
+        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
             a.triggered.connect(lambda _, t=t: setattr(s.m, 'tool', t)); g.addAction(a); tb.addAction(a)
         tb.addSeparator(); sn = QAction('Snap to 5', s); sn.setCheckable(True); sn.setChecked(True)
@@ -1786,18 +1986,39 @@ class Win(QMainWindow):
         s.zflags.textChanged.connect(lambda: s.edit('zflags', s.zflags.toPlainText()))
         s.ricochet = QCheckBox('Ricochet (shots always bounce off)')
         s.ricochet.toggled.connect(lambda v: s.edit('ricochet', v))
+        s.wcolor = QComboBox(); s.wcolor.addItems(['Rogue'] + TEAM_NAMES[1:] + ['Observer', 'Rabbit'])
+        s.wcolor.currentIndexChanged.connect(lambda i: s.edit('wcolor', i))
+        s.tilt = QDoubleSpinBox(); s.tilt.setRange(-90, 90); s.tilt.valueChanged.connect(lambda v: s.edit('tilt', v))
+        s.initdelay = QDoubleSpinBox(); s.initdelay.setRange(0, 3600); s.initdelay.setSuffix(' s')
+        s.initdelay.valueChanged.connect(lambda v: s.edit('initdelay', v))
+        s.wdelay = QLineEdit(); s.wdelay.setPlaceholderText('reload times in seconds, e.g. 5 3 3 (cycles through the list)')
+        s.wdelay.editingFinished.connect(lambda: s.edit('delay', s._parse_floats(s.wdelay.text())))
+        s.wtype = QLineEdit(); s.wtype.setPlaceholderText('flag it fires, e.g. SW (see bzflag.org/documentation/flags)')
+        s.wtype.editingFinished.connect(lambda: s.edit('wtype', s.wtype.text().strip()))
+        s.trigger = QComboBox(); s.trigger.addItems(['Normal (timed)', 'On flag capture'])
+        s.trigger.currentIndexChanged.connect(lambda i: s.edit('trigger', 'oncap' if i == 1 else ''))
+        s.eventteam = QComboBox(); s.eventteam.addItems(TEAM_NAMES[1:])
+        s.eventteam.currentIndexChanged.connect(lambda i: s.edit('eventteam', i + 1))
         s.tintc = {}
         s.tint_widget = QWidget(); trow = QHBoxLayout(s.tint_widget); trow.setContentsMargins(0, 0, 0, 0)
         for ch in ('R', 'G', 'B', 'A'):
             b = QDoubleSpinBox(); b.setRange(0, 1); b.setSingleStep(.05); b.setValue(1)
             b.valueChanged.connect(lambda v, ch=ch: s.edit_tint(ch, v))
             trow.addWidget(QLabel(ch)); trow.addWidget(b); s.tintc[ch] = b
+        s.match_color_btn = QPushButton('Match Team Color'); s.match_color_btn.clicked.connect(s.do_match_team_color)
+        s.mirror_phys_btn = QPushButton('Mirror Physics to Family'); s.mirror_phys_btn.clicked.connect(s.do_mirror_physics)
         fl.addRow('Team', s.team); fl.addRow('Group team override', s.gteam); fl.addRow('Group prefab', s.gname)
+        s.member_combo = QComboBox(); s.member_combo.currentIndexChanged.connect(s.pick_member)
+        fl.addRow('Edit member', s.member_combo)
         fl.addRow('Front links to', s.link); fl.addRow('Back links to', s.blink)
         fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
         fl.addRow(s.flip); fl.addRow('Passability', s.phys); fl.addRow(s.ricochet)
-        fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('Group tint (RGBA)', s.tint_widget)
+        fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('', s.mirror_phys_btn)
+        fl.addRow('Group tint (RGBA)', s.tint_widget); fl.addRow('', s.match_color_btn)
         fl.addRow('Spawn teams', s.zteam); fl.addRow('Safety for teams', s.zsafety); fl.addRow('Flags', s.zflags)
+        fl.addRow('Weapon color', s.wcolor); fl.addRow('Tilt', s.tilt); fl.addRow('Init delay', s.initdelay)
+        fl.addRow('Reload times', s.wdelay); fl.addRow('Fires flag', s.wtype)
+        fl.addRow('Trigger', s.trigger); fl.addRow('Capturing team', s.eventteam)
         fl.addRow('Material (all faces)', s.mat)
         s.face = {}
         for fk, fl_ in (('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom'), ('inside', 'Inside'),
@@ -1870,53 +2091,90 @@ class Win(QMainWindow):
         if added: msg += ' Built symmetry for %d new object%s.' % (added, '' if added == 1 else 's')
         s.statusBar().showMessage(msg, 6000)
 
-    def edit(s, k, v):
+    def current_obj(s):
+        """The object the panel should actually read/write: normally the selection, but if
+        'Edit member' has picked one of a group's prefab children, that child instead --
+        editing it mutates the prefab in place, same as editing any other object's fields."""
         o = s.m.sel
+        if s.editing_member and o and o.t == 'group' and s.editing_member[0] is o:
+            kids = s.m.defines.get(o.name, [])
+            if 0 <= s.editing_member[1] < len(kids): return kids[s.editing_member[1]]
+            s.editing_member = None
+        return o
+
+    def pick_member(s, idx):
+        if s.busy: return
+        s.editing_member = (s.m.sel, idx - 1) if idx > 0 else None
+        s.pushed = False; s.refresh()
+
+    def edit(s, k, v):
+        o = s.current_obj()
         if s.busy or not o: return
         if not s.pushed: s.m.push(); s.pushed = True
         setattr(o, k, v)
-        if k not in ('link', 'blink', 'name'): s.m.sync_family(o)
+        if not s.editing_member and k not in ('link', 'blink', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
     def edit_face(s, k, v):
-        o = s.m.sel
+        o = s.current_obj()
         if s.busy or not o: return
         if not s.pushed: s.m.push(); s.pushed = True
         if v: o.mats[k] = v
         else: o.mats.pop(k, None)
-        s.m.sync_family(o); s.busy = True; s.m.changed.emit(); s.busy = False
+        if not s.editing_member: s.m.sync_family(o)
+        s.busy = True; s.m.changed.emit(); s.busy = False
 
     def edit_tint(s, ch, v):
-        o = s.m.sel
+        o = s.current_obj()
         if s.busy or not o: return
         if not s.pushed: s.m.push(); s.pushed = True
         i = 'RGBA'.index(ch); t = list(o.tint); t[i] = v; o.tint = tuple(t)
-        s.m.sync_family(o); s.busy = True; s.m.changed.emit(); s.busy = False
+        if not s.editing_member: s.m.sync_family(o)
+        s.busy = True; s.m.changed.emit(); s.busy = False
 
     def on_select(s):
-        s.pushed = False; s.refresh()
+        s.pushed = False; s.editing_member = None; s.refresh()
 
     def refresh(s):
         if s.busy: return
-        o = s.m.sel; s.busy = True
-        s.dock.widget().setEnabled(o is not None)
-        s.dock.setWindowTitle('Selected object' + (': ' + o.t + (' ' + o.name if o.name else '') if o else ''))
-        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('group', 'mesh'), 'sy': o and o.t not in ('group', 'mesh'),
-                'sz': o and o.t not in ('group', 'mesh'), 'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
-                'gteam': o and o.t == 'group', 'gname': o and o.t == 'group',
+        grp = s.m.sel if s.m.sel and s.m.sel.t == 'group' else None
+        o = s.current_obj(); s.busy = True
+        s.dock.widget().setEnabled(s.m.sel is not None)
+        title = 'Selected object'
+        if o: title += ': ' + o.t + (' ' + o.name if o.name else '') + (' (in %s)' % grp.name if grp and o is not grp else '')
+        s.dock.setWindowTitle(title)
+        if grp:
+            kids = s.m.defines.get(grp.name, [])
+            s.member_combo.clear(); s.member_combo.addItem('(whole group)')
+            s.member_combo.addItems(['%d: %s%s' % (i, k.t, ' ' + k.name if k.name else '') for i, k in enumerate(kids)])
+            want = (s.editing_member[1] + 1) if (s.editing_member and s.editing_member[0] is grp) else 0
+            if want < s.member_combo.count(): s.member_combo.setCurrentIndex(want)
+        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('group', 'mesh', 'weapon'),
+                'sy': o and o.t not in ('group', 'mesh', 'weapon'), 'sz': o and o.t not in ('group', 'mesh', 'weapon'),
+                'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
+                'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
                 'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'flip': o and o.t == 'pyramid',
                 'phys': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'zteam': o and o.t == 'zone',
                 'zsafety': o and o.t == 'zone', 'zflags': o and o.t == 'zone',
                 'ricochet': o and o.t in ('box', 'pyramid', 'arc', 'cone', 'group'),
-                'phydrv_combo': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'tintrow': o and o.t == 'group'}
+                'wcolor': o and o.t == 'weapon', 'tilt': o and o.t == 'weapon', 'initdelay': o and o.t == 'weapon',
+                'wdelay': o and o.t == 'weapon', 'wtype': o and o.t == 'weapon', 'trigger': o and o.t == 'weapon',
+                'eventteam': o and o.t == 'weapon' and o.trigger == 'oncap',
+                'phydrv_combo': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'tintrow': o and o.t == 'group',
+                'match_color_btn': o and o.t == 'group' and o.fam,
+                'mirror_phys_btn': o and o.t in ('box', 'pyramid', 'arc', 'cone') and o.fam and o.phydrv}
         for name, vis in rows.items():
             widget = {'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
+                      'member_combo': s.member_combo,
                       'link': s.link, 'blink': s.blink, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
                       'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
+                      'wcolor': s.wcolor, 'tilt': s.tilt, 'initdelay': s.initdelay, 'wdelay': s.wdelay,
+                      'wtype': s.wtype, 'trigger': s.trigger, 'eventteam': s.eventteam,
+                      'match_color_btn': s.match_color_btn, 'mirror_phys_btn': s.mirror_phys_btn,
                       'tintrow': s.tint_widget}[name]
             row = s.dock.widget().layout().labelForField(widget)
             widget.setVisible(bool(vis))
@@ -1943,6 +2201,10 @@ class Win(QMainWindow):
                 cb.clear(); cb.addItems([''] + sorted(set(s.m.materials) | ({cur} if cur else set())))
                 cb.setCurrentText(cur)
             s.flip.setChecked(o.flipz if o.t == 'pyramid' else False)
+            if o.t == 'weapon':
+                s.wcolor.setCurrentIndex(o.wcolor); s.tilt.setValue(o.tilt); s.initdelay.setValue(o.initdelay)
+                s.wdelay.setText(' '.join(num(d) for d in o.delay)); s.wtype.setText(o.wtype)
+                s.trigger.setCurrentIndex(1 if o.trigger == 'oncap' else 0); s.eventteam.setCurrentIndex(o.eventteam - 1)
             s.phys.setCurrentIndex(['normal', 'drivethrough', 'shootthrough', 'passable'].index(o.phys)
                                     if o.phys in ('normal', 'drivethrough', 'shootthrough', 'passable') else 0)
             s.ricochet.setChecked(o.ricochet)
@@ -1962,8 +2224,25 @@ class Win(QMainWindow):
             except ValueError: pass
         return sorted(set(out))
 
+    def _parse_floats(s, text):
+        out = []
+        for tok in text.replace(',', ' ').split():
+            try: out.append(float(tok))
+            except ValueError: pass
+        return out
+
     def set_world(s, v):
         if not s.busy and v != s.m.W: s.m.push(); s.m.W = v; s.ed.fit(); s.m.changed.emit()
+
+    def do_match_team_color(s):
+        o = s.current_obj()
+        if not o or not o.fam: return
+        s.m.push(); s.m.match_team_color(o); s.m.changed.emit(); s.refresh()
+
+    def do_mirror_physics(s):
+        o = s.current_obj()
+        if not o or not o.fam or not o.phydrv: return
+        s.m.push(); s.m.mirror_physics_for_family(o); s.m.changed.emit(); s.refresh()
 
     def do_group(s):
         if not s.m.group_selection():
