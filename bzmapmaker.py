@@ -7,6 +7,8 @@ OpenGL is required. Textures are applied to box faces with Qt's 2D projective qu
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, math, json, hashlib
+
+__version__ = '1.4.2'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer
@@ -270,6 +272,7 @@ def parse(text):
         lines.append(code); metas.append(pending); pending = None
     i = 0
     nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
+    world = new_world()
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
            'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
@@ -316,9 +319,20 @@ def parse(text):
         line_meta = metas[i]; p = lines[i].split(); i += 1
         k = p[0].lower()
         if k == 'world':
-            v = read_block()
-            try: nw = float(v['size'][0])
-            except Exception: pass
+            while i < len(lines):  # read line by line so unknown parameters are kept verbatim
+                q = lines[i].split(); i += 1
+                key = q[0].lower()
+                if key == 'end': break
+                if key == 'size':
+                    try: nw = float(q[1])
+                    except (IndexError, ValueError): pass
+                elif key == 'name': world['name'] = ' '.join(q[1:])
+                elif key == 'flagheight':
+                    try: world['flagheight'] = float(q[1])
+                    except (IndexError, ValueError): pass
+                elif key == 'nowalls': world['nowalls'] = True
+                elif key == 'freectfspawns': world['freectf'] = True
+                else: world['extra'].append(' '.join(q))
         elif k == 'material':
             body = read_raw_block()
             name, tex, color, extra = '', '', (1.0, 1.0, 1.0, 1.0), []
@@ -519,7 +533,7 @@ def parse(text):
             if o.t == 'teleporter' and o.name == fn:
                 if fface == 'f': o.link = tn
                 elif fface == 'b': o.blink = tn
-    return nw, objs, materials, defines, extras, options_text, physics
+    return nw, objs, materials, defines, extras, options_text, physics, world
 
 
 def obj_block(o):
@@ -593,6 +607,23 @@ def material_block(m):
     return ln + ['  ' + e for e in m.extra] + ['end']
 
 
+def new_world():
+    """Settings for the 'world' block other than its size (which lives in Model.W).
+    flagheight None = not set, so BZFlag's own default applies and nothing is written.
+    `extra` keeps any parameter this editor doesn't know about, so it survives a round trip."""
+    return {'name': '', 'flagheight': None, 'nowalls': False, 'freectf': False, 'extra': []}
+
+
+def world_block(w, size):
+    ln = ['world']
+    if w.get('name'): ln.append('  name %s' % w['name'])
+    ln.append('  size %s' % num(size))
+    if w.get('flagheight') is not None: ln.append('  flagHeight %s' % num(w['flagheight']))
+    if w.get('nowalls'): ln.append('  noWalls')
+    if w.get('freectf'): ln.append('  freeCtfSpawns')
+    return ln + ['  ' + e for e in w.get('extra', [])] + ['end']
+
+
 def physics_block(p):
     if p.raw: return ['physics'] + ['  ' + b for b in p.raw] + ['end']  # untouched since import
     ln = ['physics', '  name %s' % p.name]
@@ -612,14 +643,17 @@ class Model(QObject):
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.options_text = ''
         s.physics = {}
+        s.world = new_world()  # Objects -> World Settings
         s.nid, s.sym = 1, 0
         s.tool, s.snap = 'select', True
+        s.show_zones = True  # View → Show Zones; zones are editor-only aids and can clutter large maps
 
     def push(s):
         d = {'W': s.W, 'objs': [asdict(o) for o in s.objs],
              'materials': {k: asdict(v) for k, v in s.materials.items()},
              'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras,
-             'options_text': s.options_text, 'physics': {k: asdict(v) for k, v in s.physics.items()}}
+             'options_text': s.options_text, 'physics': {k: asdict(v) for k, v in s.physics.items()},
+             'world': s.world}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -631,6 +665,7 @@ class Model(QObject):
         s.extras = d.get('extras', [])
         s.options_text = d.get('options_text', '')
         s.physics = {k: PhysicsDriver(**v) for k, v in d.get('physics', {}).items()}
+        s.world = d.get('world') or new_world()
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
 
@@ -646,6 +681,10 @@ class Model(QObject):
         s.sel = o; s.selected.emit()
 
     def toggle_msel(s, o):
+        # When starting a multi-select, keep the previously selected object in the set
+        # so Ctrl+clicking the second object doesn't drop the first one.
+        if not s.msel and s.sel and s.sel is not o:
+            s.msel.append(s.sel)
         if o in s.msel: s.msel.remove(o)
         else: s.msel.append(o)
         s.select(o)
@@ -829,9 +868,8 @@ class Model(QObject):
 
     def group_selection(s):
         """Ctrl+G. If exactly one of the selected objects is already a group, everything
-        else selected is added into it. Otherwise each selected object becomes its own new
-        group -- one object per group by default, so each copy can carry its own independent
-        tint, material, or physics driver without a shared prefab forcing them to match."""
+        else selected is added into it. Otherwise all selected non-group objects are
+        wrapped into a single new prefab + group instance at their centroid."""
         sel = s.msel or ([s.sel] if s.sel else [])
         groups = [o for o in sel if o.t == 'group']; plain = [o for o in sel if o.t != 'group']
         if not sel: return None
@@ -842,16 +880,16 @@ class Model(QObject):
             s.msel = []; s.select(g); s.changed.emit()
             return g.name
         if not plain: return None
-        made = []
+        g = s.make_group(plain)
         for o in plain:
-            g = s.make_group([o])
-            s.objs.remove(o); s.objs.append(g); made.append(g)
-        s.msel = []; s.select(made[-1]); s.changed.emit()
-        return made[-1].name
+            s.objs.remove(o)
+        s.objs.append(g)
+        s.msel = []; s.select(g); s.changed.emit()
+        return g.name
 
     def load(s, text, folder=None):
-        nw, objs, materials, defines, extras, options_text, physics = parse(text)
-        s.push(); s.W = nw or s.W; s.objs = objs; s.materials = materials; s.defines = defines
+        nw, objs, materials, defines, extras, options_text, physics, world = parse(text)
+        s.push(); s.W = nw or s.W; s.world = world; s.objs = objs; s.materials = materials; s.defines = defines
         s.extras = extras; s.options_text = options_text; s.physics = physics
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
@@ -859,7 +897,7 @@ class Model(QObject):
         s.reset.emit(); s.selected.emit(); s.changed.emit()
 
     def text(s):
-        out = ['# Made with BZ Map Maker', 'world', '  size %s' % num(s.W), 'end', '']
+        out = ['# Made with BZ Map Maker'] + world_block(s.world, s.W) + ['']
         if s.options_text.strip():
             out += ['options'] + ['  ' + ln for ln in s.options_text.splitlines() if ln.strip()] + ['end', '']
         for pd in s.physics.values(): out += physics_block(pd) + ['']
@@ -994,15 +1032,18 @@ class Editor(QWidget):
         elif leaf.t == 'zone':
             # Zones are invisible in the actual game -- this checkerboard is an editor aid only,
             # one color per spawning team (0=rogue=black), so you can see coverage at a glance.
-            colors = zone_colors(leaf)
-            nx, ny, cw, ch = zone_grid(leaf.sx, leaf.sy)
-            p.setPen(Qt.PenStyle.NoPen)
-            for ix in range(nx):
-                for iy in range(ny):
-                    col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(100)
-                    p.setBrush(col); p.drawRect(QRectF(-leaf.sx + ix * cw, -leaf.sy + iy * ch, cw, ch))
-            p.setPen(cpen('#22262b', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
+            if not s.m.show_zones:
+                pass  # View → Show Zones toggles this off so zones stop obscuring the map
+            else:
+                colors = zone_colors(leaf)
+                nx, ny, cw, ch = zone_grid(leaf.sx, leaf.sy)
+                p.setPen(Qt.PenStyle.NoPen)
+                for ix in range(nx):
+                    for iy in range(ny):
+                        col = QColor(colors[(ix + iy) % len(colors)]); col.setAlpha(100)
+                        p.setBrush(col); p.drawRect(QRectF(-leaf.sx + ix * cw, -leaf.sy + iy * ch, cw, ch))
+                p.setPen(cpen('#22262b', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
         elif leaf.t == 'weapon':
             # Weapons have no appearance in the real game either -- an arrow along the
             # rotation (already applied above via p.rotate) shows aim direction at a glance.
@@ -1237,7 +1278,7 @@ def raster_triangle(zbuf, cbuf, pts, depths, rgba):
     if minx > maxx or miny > maxy: return
     denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
     if abs(denom) < 1e-9: return  # edge-on / degenerate triangle
-    xs, ys = np.meshgrid(np.arange(minx, maxx + 1, dtype=np.float64), np.arange(miny, maxy + 1, dtype=np.float64))
+    xs, ys = np.meshgrid(np.arange(minx, maxx + 1, dtype=np.float32), np.arange(miny, maxy + 1, dtype=np.float32))
     w0 = ((y1 - y2) * (xs - x2) + (x2 - x1) * (ys - y2)) / denom
     w1 = ((y2 - y0) * (xs - x2) + (x0 - x2) * (ys - y2)) / denom
     w2 = 1.0 - w0 - w1
@@ -1257,6 +1298,10 @@ class Preview(QWidget):
     def __init__(s, m):
         super().__init__()
         s.m, s.yaw, s.pitch, s.dist, s.last, s.act, s.space = m, .5, .55, 1100., None, None, False
+        # _lod > 1 = render at 1/_lod resolution while orbiting/dragging (big speed-up on complex maps)
+        s._lod, s._rw, s._rh, s._hires_timer = 1, None, None, QTimer(s)
+        s._hires_timer.setSingleShot(True)
+        s._hires_timer.timeout.connect(s._finish_lod)
         s.setMinimumSize(320, 240); s.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         m.changed.connect(s.update); m.selected.connect(s.update)
 
@@ -1272,9 +1317,25 @@ class Preview(QWidget):
         pos, f, r, u = B; d = [q[i] - pos[i] for i in range(3)]
         zc = sum(d[i] * f[i] for i in range(3))
         if zc < 5: return None
-        k = s.height() * .9 / zc
-        return QPointF(s.width() / 2 + sum(d[i] * r[i] for i in range(3)) * k,
-                       s.height() / 2 - sum(d[i] * u[i] for i in range(3)) * k)
+        w = s._rw if s._rw is not None else s.width()
+        h = s._rh if s._rh is not None else s.height()
+        k = h * .9 / zc
+        return QPointF(w / 2 + sum(d[i] * r[i] for i in range(3)) * k,
+                       h / 2 - sum(d[i] * u[i] for i in range(3)) * k)
+
+    def _begin_lod(s):
+        """Drop to half-res while the user is orbiting or dragging; full-res resumes shortly after."""
+        if s._lod == 1:
+            s._lod = 2
+        s._hires_timer.stop()
+
+    def _finish_lod(s):
+        if s._lod != 1:
+            s._lod = 1
+            s.update()
+
+    def _schedule_hires(s):
+        s._hires_timer.start(120)  # ms of idle before a full-resolution redraw
 
     def solids(s):
         """Return (points, color, source_obj, texinfo) faces, texinfo=None or (pixmap, uv0..uv3)."""
@@ -1289,7 +1350,9 @@ class Preview(QWidget):
             C = lambda face, o=o, col=col: s.face_color(o, face, col)
             z0 = o.z; z1 = z0 + max(o.sz, .3)
             if o.t == 'zone':
-                F += s.zone_faces(o, P, z1); continue
+                if s.m.show_zones:
+                    F += s.zone_faces(o, P, z1)
+                continue
             if o.t == 'arc':
                 F += s.arc_faces(o, P, z0, z1, C); continue
             if o.t == 'cone':
@@ -1414,22 +1477,34 @@ class Preview(QWidget):
         def tris(pts):  # a face is drawn as one or more planar triangles
             return [pts] if len(pts) <= 3 else [(pts[0], pts[i], pts[i + 1]) for i in range(1, len(pts) - 1)]
 
-        w_px, h_px = max(1, s.width()), max(1, s.height())
-        zbuf = np.full((h_px, w_px), np.inf); cbuf = np.zeros((h_px, w_px, 4), dtype=np.uint8)
+        lod = max(1, int(s._lod))
+        full_w, full_h = max(1, s.width()), max(1, s.height())
+        w_px, h_px = max(1, full_w // lod), max(1, full_h // lod)
+        s._rw, s._rh = w_px, h_px  # proj() uses these while we rasterize at reduced size
+        zbuf = np.full((h_px, w_px), np.inf, dtype=np.float32)
+        cbuf = np.zeros((h_px, w_px, 4), dtype=np.uint8)
         sel_faces = []  # original (untriangulated) faces of the selected object, for its outline
         for pts, col, o, tex in s.solids():
             if o is s.m.sel: sel_faces.append(pts)
             for tri in tris(pts):
+                # Back-face cull (opaque only). Camera looks along +f; outward normal n_ facing
+                # the same way as f means the face is facing away and can be skipped.
+                u = [tri[1][j] - tri[0][j] for j in range(3)]; w_ = [tri[2][j] - tri[0][j] for j in range(3)]
+                n_ = (u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0])
+                if (col.alpha() or 255) >= 250 and sum(n_[i] * f[i] for i in range(3)) > 0:
+                    continue
                 screen = [s.proj(B, v) for v in tri]
                 if None in screen: continue  # a vertex behind the camera: skip, same as before
                 depths = [sum((tri[i][j] - pos[j]) * f[j] for j in range(3)) for i in range(3)]
-                u = [tri[1][j] - tri[0][j] for j in range(3)]; w_ = [tri[2][j] - tri[0][j] for j in range(3)]
-                n_ = (u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0])
                 nl = math.sqrt(sum(x * x for x in n_)) or 1
                 k = .5 + .5 * abs(sum(n_[i] * s.LIGHT[i] for i in range(3))) / (nl * L)
                 rgba = (int(col.red() * k), int(col.green() * k), int(col.blue() * k), col.alpha() or 255)
                 raster_triangle(zbuf, cbuf, [(pt.x(), pt.y()) for pt in screen], depths, rgba)
+        s._rw = s._rh = None
         img = QImage(cbuf.data, w_px, h_px, w_px * 4, QImage.Format.Format_RGBA8888).copy()
+        if lod > 1:
+            img = img.scaled(full_w, full_h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                             Qt.TransformationMode.FastTransformation)
         p.drawImage(0, 0, img)
         for pts in sel_faces:  # outline the selected object on top of the rasterized image
             pg = poly(pts)
@@ -1570,7 +1645,8 @@ class Preview(QWidget):
         p = e.position()
         if s.last is not None:  # orbiting
             s.yaw -= (p.x() - s.last.x()) * .008
-            s.pitch = min(1.5, max(.05, s.pitch + (p.y() - s.last.y()) * .008)); s.last = p; s.update(); return
+            s.pitch = min(1.5, max(.05, s.pitch + (p.y() - s.last.y()) * .008)); s.last = p
+            s._begin_lod(); s.update(); return
         a = getattr(s, 'act', None)
         if not a: return
         m = s.m
@@ -1580,17 +1656,18 @@ class Preview(QWidget):
             if hit:
                 o.x, o.y = s.sn(hit[0]), s.sn(hit[1])
                 if m.sym and not o.fam: m.make_family(o)  # see Editor.mouseMoveEvent for why this is here
-                m.sync_family(o); m.changed.emit()
+                m.sync_family(o); s._begin_lod(); m.changed.emit()
         elif a[0] == 'rotate':
             _, o, r0, x0 = a
             o.r = (r0 + (p.x() - x0) * .5) % 360
-            m.sync_family(o); m.changed.emit()
+            m.sync_family(o); s._begin_lod(); m.changed.emit()
         elif a[0] == 'make':
             hit = ray_ground(*s.ray(p))
-            if hit: s.act = (a[0], a[1], (s.sn(hit[0]), s.sn(hit[1])), a[3]); s.update()
+            if hit: s.act = (a[0], a[1], (s.sn(hit[0]), s.sn(hit[1])), a[3]); s._begin_lod(); s.update()
 
     def mouseReleaseEvent(s, e):
         a = getattr(s, 'act', None); s.act = None; s.last = None
+        s._schedule_hires()
         if not a or a[0] != 'make': return
         (ax, ay), (bx, by), p0 = a[1], a[2], a[3]
         m = s.m; m.push(); o = m.add(m.tool, ax, ay)
@@ -1599,7 +1676,8 @@ class Preview(QWidget):
         m.make_family(o); m.select(o); m.changed.emit()
 
     def wheelEvent(s, e):
-        s.dist = min(8000, max(40, s.dist * (.9 if e.angleDelta().y() > 0 else 1 / .9))); s.update()
+        s.dist = min(8000, max(40, s.dist * (.9 if e.angleDelta().y() > 0 else 1 / .9)))
+        s._begin_lod(); s.update(); s._schedule_hires()
 
     def keyPressEvent(s, e):
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat(): s.space = True
@@ -1803,6 +1881,45 @@ class RadarHost(QWidget):
         s.corner = c; s.do_layout()
 
 
+class WorldDialog(QDialog):
+    """The map's single 'world' block (see wiki.bzflag.org/World_(object)): name, size,
+    flagHeight, noWalls and freeCtfSpawns. Size is the same value as the toolbar's world-size box."""
+
+    def __init__(s, m):
+        super().__init__(); s.m = m
+        s.setWindowTitle('World Settings'); s.resize(460, 0)
+        w = m.world
+        col = QVBoxLayout(s); form = QFormLayout(); col.addLayout(form)
+        s.name = QLineEdit(w['name']); s.name.setPlaceholderText('(unnamed -- generally unused by BZFlag)')
+        form.addRow('Name', s.name)
+        s.size = QDoubleSpinBox(); s.size.setRange(50, 5000); s.size.setSingleStep(50); s.size.setValue(m.W)
+        s.size.setToolTip('Distance from the map center to each outer wall; the world is twice this across. Default 400.')
+        form.addRow('Size (half-width)', s.size)
+        s.use_fh = QCheckBox('Set flag height'); s.use_fh.setChecked(w['flagheight'] is not None)
+        s.fh = QDoubleSpinBox(); s.fh.setRange(0, 1000); s.fh.setSingleStep(1)
+        s.fh.setValue(w['flagheight'] if w['flagheight'] is not None else 10.0); s.fh.setEnabled(s.use_fh.isChecked())
+        s.fh.setToolTip('Z clearance needed for a flag to spawn. Matters on maps with objects stacked in Z.')
+        s.use_fh.toggled.connect(s.fh.setEnabled)
+        form.addRow(s.use_fh); form.addRow('  Flag height', s.fh)
+        s.nowalls = QCheckBox('No walls -- remove the outer walls (also the collision wall and the radar outline)')
+        s.nowalls.setChecked(w['nowalls']); form.addRow(s.nowalls)
+        s.freectf = QCheckBox('Free CTF spawns -- after a team flag is captured, players spawn randomly, not at the base')
+        s.freectf.setChecked(w['freectf']); form.addRow(s.freectf)
+        if w['extra']:
+            note = QLabel('Also kept unchanged: ' + '; '.join(w['extra'])); note.setWordWrap(True); col.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(s.save); bb.rejected.connect(s.reject); col.addWidget(bb)
+
+    def save(s):
+        m = s.m; m.push()
+        m.world = {'name': s.name.text().strip(),
+                   'flagheight': s.fh.value() if s.use_fh.isChecked() else None,
+                   'nowalls': s.nowalls.isChecked(), 'freectf': s.freectf.isChecked(),
+                   'extra': list(m.world['extra'])}
+        m.W = s.size.value()
+        m.changed.emit(); s.accept()
+
+
 class PhysicsDialog(QDialog):
     def __init__(s, m):
         super().__init__(); s.m, s.cur = m, None
@@ -1912,6 +2029,11 @@ class Win(QMainWindow):
     def set_corner(s, corner):
         s.radar_widget.set_corner(corner); s.settings.setValue('radarCorner', corner)
 
+    def toggle_show_zones(s, on):
+        s.m.show_zones = bool(on)
+        s.settings.setValue('showZones', 'true' if on else 'false')
+        s.m.changed.emit()  # refresh 2D + 3D views
+
     def act(s, menu, label, fn, key=None):
         a = QAction(label, s); a.triggered.connect(fn)
         if key: a.setShortcut(QKeySequence(key))
@@ -1929,6 +2051,7 @@ class Win(QMainWindow):
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
+        s.act(ob, 'World Settings...', s.open_world)
         s.act(ob, 'Map Options...', s.open_options)
         s.act(ob, 'Physics Drivers...', s.open_physics)
         vw = s.menuBar().addMenu('&View')
@@ -1942,6 +2065,11 @@ class Win(QMainWindow):
         for key, label in (('tl', 'Top Left'), ('tr', 'Top Right'), ('bl', 'Bottom Left'), ('br', 'Bottom Right')):
             ca = QAction(label, s); ca.setCheckable(True); ca.setChecked(key == cur_corner)
             ca.triggered.connect(lambda _, k=key: s.set_corner(k)); cg.addAction(ca); cm.addAction(ca)
+        vw.addSeparator()
+        show_z = QAction('Show Zones', s); show_z.setCheckable(True)
+        show_z.setChecked(s.settings.value('showZones', 'true') != 'false')
+        s.m.show_zones = show_z.isChecked()
+        show_z.toggled.connect(s.toggle_show_zones); vw.addAction(show_z)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
         for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
@@ -2251,6 +2379,10 @@ class Win(QMainWindow):
     def open_materials(s):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
+    def open_world(s):
+        old = s.m.W
+        if WorldDialog(s.m).exec() and s.m.W != old: s.ed.fit()
+
     def open_options(s):
         OptionsDialog(s.m).exec()
 
@@ -2267,7 +2399,7 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Import failed', str(e)); return
-        nw, objs, materials, defines, extras, options_text, physics = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics, _world = parse(text)
         meshes = [o for o in objs if o.t == 'mesh']
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
@@ -2352,6 +2484,8 @@ class Win(QMainWindow):
 
 
 if __name__ == '__main__':
+    if '--version' in sys.argv[1:]:
+        print('BZ Map Maker', __version__); sys.exit(0)
     app = QApplication(sys.argv)
     w = Win(sys.argv[1] if len(sys.argv) > 1 else None); w.show()
     sys.exit(app.exec())
