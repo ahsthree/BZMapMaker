@@ -454,7 +454,7 @@ def parse(text):
             while i < len(lines):
                 if lines[i].split()[0].lower() == 'enddef': i += 1; break
                 sub.append(lines[i]); i += 1
-            _, kids, _, _, _, _, _ = parse('\n'.join(sub))
+            _, kids, *_ = parse('\n'.join(sub))
             defines[name] = kids
         elif k == 'group':
             v = read_block()
