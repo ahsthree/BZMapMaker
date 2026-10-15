@@ -1427,22 +1427,22 @@ class Preview(QWidget):
             cb, ct = P(0, 0, z0), P(0, 0, z1)
             for i in range(segs):
                 j = (i + 1) % pts
-                F.append(([cb, V(outer[i], z0), V(outer[j], z0)], C('bottom'), o, None))
+                F.append(([cb, V(outer[j], z0), V(outer[i], z0)], C('bottom'), o, None))
                 F.append(([ct, V(outer[i], z1), V(outer[j], z1)], C('top'), o, None))
             if not full:
                 F.append(([cb, V(outer[0], z0), V(outer[0], z1), ct], C('startside'), o, None))
-                F.append(([cb, V(outer[-1], z0), V(outer[-1], z1), ct], C('endside'), o, None))
+                F.append(([ct, V(outer[-1], z1), V(outer[-1], z0), cb], C('endside'), o, None))
         else:
             ir = 1 - ratio
             inner = [P(o.sx * ir * math.cos(ang(i)), o.sy * ir * math.sin(ang(i)), 0) for i in range(pts)]
             for i in range(segs):
                 j = (i + 1) % pts
                 F.append(([V(inner[i], z0), V(inner[j], z0), V(outer[j], z0), V(outer[i], z0)], C('bottom'), o, None))
-                F.append(([V(inner[i], z1), V(inner[j], z1), V(outer[j], z1), V(outer[i], z1)], C('top'), o, None))
+                F.append(([V(outer[i], z1), V(outer[j], z1), V(inner[j], z1), V(inner[i], z1)], C('top'), o, None))
                 F.append(([V(inner[i], z0), V(inner[i], z1), V(inner[j], z1), V(inner[j], z0)], C('inside'), o, None))
             if not full:
-                for idx, face in ((0, 'startside'), (-1, 'endside')):
-                    F.append(([V(inner[idx], z0), V(outer[idx], z0), V(outer[idx], z1), V(inner[idx], z1)], C(face), o, None))
+                F.append(([V(inner[0], z0), V(outer[0], z0), V(outer[0], z1), V(inner[0], z1)], C('startside'), o, None))
+                F.append(([V(inner[-1], z1), V(outer[-1], z1), V(outer[-1], z0), V(inner[-1], z0)], C('endside'), o, None))
         return F
 
     def cone_faces(s, o, P, z0, z1, col):
@@ -1453,7 +1453,7 @@ class Preview(QWidget):
         for i in range(N):
             j = (i + 1) % N
             F.append(([(ring[i][0], ring[i][1], z0), (ring[j][0], ring[j][1], z0), apex], col, o, None))
-            F.append(([ctr, (ring[i][0], ring[i][1], z0), (ring[j][0], ring[j][1], z0)], col, o, None))
+            F.append(([ctr, (ring[j][0], ring[j][1], z0), (ring[i][0], ring[i][1], z0)], col, o, None))
         return F
 
     def paintEvent(s, _):
