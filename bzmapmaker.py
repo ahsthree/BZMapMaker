@@ -454,7 +454,7 @@ def parse(text):
             while i < len(lines):
                 if lines[i].split()[0].lower() == 'enddef': i += 1; break
                 sub.append(lines[i]); i += 1
-            _, kids, _, _, _, _, _ = parse('\n'.join(sub))
+            _, kids, *_ = parse('\n'.join(sub))
             defines[name] = kids
         elif k == 'group':
             v = read_block()
@@ -688,6 +688,17 @@ class Model(QObject):
         if o in s.msel: s.msel.remove(o)
         else: s.msel.append(o)
         s.select(o)
+
+    def select_in_rect(s, x0, y0, x1, y1, add=False):
+        """Box select: every top-level object whose center lies inside the rectangle joins the
+        multi-selection (the same set Ctrl+click builds), ready for Ctrl+G. add=True keeps what
+        was already selected."""
+        lx, hx, ly, hy = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+        keep = (list(s.msel) or ([s.sel] if s.sel else [])) if add else []
+        new = keep + [o for o in s.objs if lx <= o.x <= hx and ly <= o.y <= hy and o not in keep]
+        s.msel = new
+        s.select(new[-1] if new else None)
+        return len(new)
 
     def group_bounds(s, name):
         kids = s.defines.get(name, [])
@@ -948,7 +959,8 @@ def cpen(color, w=1, style=Qt.PenStyle.SolidLine):
     p = QPen(QColor(color), w, style); p.setCosmetic(True); return p
 
 
-HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select for grouping. '
+HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select for grouping, or Shift+drag a box '
+                   '(Ctrl+Shift+drag adds to the selection), then Ctrl+G. '
                    'Drag empty space or use the right mouse button to pan; scroll to zoom.',
         'box': 'Drag corner to corner, or click for a default box.',
         'pyramid': 'Drag corner to corner, or click for a default pyramid.',
@@ -1105,6 +1117,9 @@ class Editor(QWidget):
             p.setPen(cpen('#e0b84f', 2)); p.setBrush(QColor(224, 184, 79, 90))
             p.drawEllipse(QPointF(lx, ly), 4 / S, 4 / S)
         d = s.drag
+        if d and d[0] == 'marquee':
+            (ax, ay), (bx, by) = d[1], d[2]; p.setPen(cpen('#c8453b', 1.5, Qt.PenStyle.DashLine)); p.setBrush(QColor(200, 69, 59, 40))
+            p.drawRect(QRectF(min(ax, bx), min(ay, by), abs(ax - bx), abs(ay - by)))
         if d and d[0] == 'make':
             (ax, ay), (bx, by) = d[1], d[2]; p.setPen(cpen(ACC, 1.5, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(QRectF(min(ax, bx), min(ay, by), abs(ax - bx), abs(ay - by)))
@@ -1137,6 +1152,9 @@ class Editor(QWidget):
             s.drag = pan; return
         if b != Qt.MouseButton.LeftButton: return
         m = s.m
+        if s.m.tool == 'select' and e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # Shift+drag = box select (Ctrl+Shift+drag adds to the current selection)
+            s.drag = ['marquee', (wx, wy), (wx, wy), bool(ctrl)]; return
         if s.m.tool == 'select':
             o = s.hit(wx, wy)
             if ctrl and o:
@@ -1163,10 +1181,13 @@ class Editor(QWidget):
                 # moment you actually drag it with symmetry on -- not on a mere click/select
                 s.m.make_family(o)
             s.m.sync_family(o); s.m.changed.emit()
+        elif d[0] == 'marquee': d[2] = (wx, wy); s.update()
         else: d[2] = (s.sn(wx), s.sn(wy)); s.update()
 
     def mouseReleaseEvent(s, e):
         d = s.drag; s.drag = None
+        if d and d[0] == 'marquee':
+            s.m.select_in_rect(d[1][0], d[1][1], d[2][0], d[2][1], add=d[3])
         if d and d[0] == 'make':
             (ax, ay), (bx, by) = d[1], d[2]; p = e.position()
             s.m.push(); o = s.m.add(s.m.tool, ax, ay)
@@ -1427,22 +1448,22 @@ class Preview(QWidget):
             cb, ct = P(0, 0, z0), P(0, 0, z1)
             for i in range(segs):
                 j = (i + 1) % pts
-                F.append(([cb, V(outer[i], z0), V(outer[j], z0)], C('bottom'), o, None))
+                F.append(([cb, V(outer[j], z0), V(outer[i], z0)], C('bottom'), o, None))
                 F.append(([ct, V(outer[i], z1), V(outer[j], z1)], C('top'), o, None))
             if not full:
                 F.append(([cb, V(outer[0], z0), V(outer[0], z1), ct], C('startside'), o, None))
-                F.append(([cb, V(outer[-1], z0), V(outer[-1], z1), ct], C('endside'), o, None))
+                F.append(([ct, V(outer[-1], z1), V(outer[-1], z0), cb], C('endside'), o, None))
         else:
             ir = 1 - ratio
             inner = [P(o.sx * ir * math.cos(ang(i)), o.sy * ir * math.sin(ang(i)), 0) for i in range(pts)]
             for i in range(segs):
                 j = (i + 1) % pts
                 F.append(([V(inner[i], z0), V(inner[j], z0), V(outer[j], z0), V(outer[i], z0)], C('bottom'), o, None))
-                F.append(([V(inner[i], z1), V(inner[j], z1), V(outer[j], z1), V(outer[i], z1)], C('top'), o, None))
+                F.append(([V(outer[i], z1), V(outer[j], z1), V(inner[j], z1), V(inner[i], z1)], C('top'), o, None))
                 F.append(([V(inner[i], z0), V(inner[i], z1), V(inner[j], z1), V(inner[j], z0)], C('inside'), o, None))
             if not full:
-                for idx, face in ((0, 'startside'), (-1, 'endside')):
-                    F.append(([V(inner[idx], z0), V(outer[idx], z0), V(outer[idx], z1), V(inner[idx], z1)], C(face), o, None))
+                F.append(([V(inner[0], z0), V(outer[0], z0), V(outer[0], z1), V(inner[0], z1)], C('startside'), o, None))
+                F.append(([V(inner[-1], z1), V(outer[-1], z1), V(outer[-1], z0), V(inner[-1], z0)], C('endside'), o, None))
         return F
 
     def cone_faces(s, o, P, z0, z1, col):
@@ -1453,7 +1474,7 @@ class Preview(QWidget):
         for i in range(N):
             j = (i + 1) % N
             F.append(([(ring[i][0], ring[i][1], z0), (ring[j][0], ring[j][1], z0), apex], col, o, None))
-            F.append(([ctr, (ring[i][0], ring[i][1], z0), (ring[j][0], ring[j][1], z0)], col, o, None))
+            F.append(([ctr, (ring[j][0], ring[j][1], z0), (ring[i][0], ring[i][1], z0)], col, o, None))
         return F
 
     def paintEvent(s, _):
@@ -2047,7 +2068,7 @@ class Win(QMainWindow):
         e = s.menuBar().addMenu('&Edit')
         s.act(e, 'Undo', s.m.pop, 'Ctrl+Z'); s.act(e, 'Duplicate', s.m.duplicate, 'Ctrl+D')
         s.act(e, 'Delete', s.m.delete, 'Delete'); s.act(e, 'Fit view', s.ed.fit, 'Ctrl+0')
-        s.act(e, 'Group Selected (Ctrl+click to multi-select)', s.do_group, 'Ctrl+G')
+        s.act(e, 'Group Selected (Ctrl+click or Shift+drag box to select)', s.do_group, 'Ctrl+G')
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
