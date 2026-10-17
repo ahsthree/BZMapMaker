@@ -6,14 +6,14 @@ Works on Windows, macOS and Linux. The 3D preview is drawn in software (QPainter
 OpenGL is required. Textures are applied to box faces with Qt's 2D projective quadToQuad
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
-import sys, os, math, json, hashlib
+import sys, os, re, math, json, copy, types, hashlib, shlex
 
 __version__ = '1.4.4'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer, QUrl
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
-                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon)
+                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon, QDesktopServices)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
@@ -70,6 +70,7 @@ class Obj:
     x: float = 0; y: float = 0; z: float = 0
     sx: float = 1; sy: float = 1; sz: float = 1
     r: float = 0; team: int = 1; name: str = ''; link: str = ''; blink: str = ''
+    mscale: tuple = (1.0, 1.0, 1.0)  # mesh leaf inside a group: the group chain's scale (see expand)
     iname: str = ''  # group instance name (BZW 'name' line in a group block); teleporters inside are named <iname>:<name>
     lface: str = 'b'; bface: str = 'f'  # teleporter: face of the link target you emerge from (front link -> its back, back link -> its front, unless changed)
     matref: str = ''
@@ -242,9 +243,10 @@ def mesh_world(o):
     """World-space vertices of a mesh object: (v + pre-shift) turned by r about Z, then shifted."""
     verts, faces = mesh_geom(o.mesh)
     a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
+    kx, ky, kz = o.mscale
     out = []
     for x, y, z in verts:
-        x += o.sx; y += o.sy; z += o.sz
+        x = (x + o.sx) * kx; y = (y + o.sy) * ky; z = (z + o.sz) * kz
         out.append((x * c - y * sn + o.x, x * sn + y * c + o.y, z + o.z))
     return out, faces
 
@@ -462,9 +464,10 @@ def parse(text):
             v = read_block()
             name = p[1] if len(p) > 1 else ''
             x, y, z = nm(v.get('shift'), (0, 0, 0))
-            r = nm(v.get('rotation'), (0,))[0]
+            r = nm(v.get('rotation', v.get('rot')), (0,))[0]
+            gsx, gsy, gsz = nm(v.get('scale'), (1, 1, 1))
             team = int(nm(v.get('team'), (0,))[0])
-            go = Obj('group', x, y, z, 1, 1, 1, r, team, name)
+            go = Obj('group', x, y, z, gsx or 1.0, gsy or 1.0, gsz or 1.0, r, team, name)
             if v.get('tint'): go.tint = tuple(nm(v['tint'], (1.0, 1.0, 1.0, 1.0)))
             go.ricochet = 'ricochet' in v
             hd, hs = 'drivethrough' in v, 'shootthrough' in v
@@ -530,47 +533,43 @@ def parse(text):
         if name.isdigit() and 0 <= int(name) < len(tele_order): name = tele_order[int(name)].name
         return name, face
 
-    inst = {g.iname: g.name for g in objs if g.t == 'group' and g.iname}
-
+    lists = [objs] + list(defines.values())
     uses = {}
-    for g in objs:
-        if g.t == 'group': uses[g.name] = uses.get(g.name, 0) + 1
+    for lst in lists:
+        for g in lst:
+            if g.t == 'group': uses[g.name] = uses.get(g.name, 0) + 1
 
     def find_tele(name):
-        """Teleporters a link endpoint names: top-level ones, or one inside a group instance
-        (written <instance name>:<teleporter name>). Returns (teleporters, plain name, prefab, instance)."""
-        top = [o for o in objs if o.t == 'teleporter' and o.name == name]
-        if top: return top, name, None, None
-        for i, ch in enumerate(name):
-            if ch == ':' and name[:i] in inst:
-                kids = [k for k in defines.get(inst[name[:i]], []) if k.t == 'teleporter' and k.name == name[i + 1:]]
-                if kids: return kids, name[i + 1:], inst[name[:i]], name[:i]
-        return [], name, None, None
+        """Teleporters a link endpoint names: top-level ones, or ones inside group instances
+        (<instance>:<teleporter>, chaining through nested instances). Returns (teleporters,
+        plain name, instance-name chain, prefab names along the chain)."""
+        parts = name.split(':'); lst, chain, defs = objs, [], []
+        for part in parts[:-1]:
+            g = next((g for g in lst if g.t == 'group' and g.iname == part), None)
+            if g is None: return [], name, (), ()
+            chain.append(part); defs.append(g.name); lst = defines.get(g.name, [])
+        return [k for k in lst if k.t == 'teleporter' and k.name == parts[-1]], parts[-1], tuple(chain), tuple(defs)
 
-    def places(name):  # how many places hold a teleporter with this plain name
-        return sum(1 for o in objs if o.t == 'teleporter' and o.name == name) + \
-               sum(1 for ks in defines.values() if any(k.t == 'teleporter' and k.name == name for k in ks))
+    def places(name):  # how many places (top level, or one prefab each) hold a teleporter with this name
+        return sum(1 for lst in lists if any(k.t == 'teleporter' and k.name == name for k in lst))
 
     raw = []
     for f, t in links:
         fn, fface = resolve(f, 'f')
         tn, tface = resolve(t, 'b' if fface == 'f' else 'f')
         if tface not in ('f', 'b'): tface = 'b' if fface == 'f' else 'f'
-        srcs, _, sdef, sinst = find_tele(fn); tgts, tplain, tdef, tinst = find_tele(tn)
+        srcs, _, schain, sdefs = find_tele(fn); tgts, tplain, tchain, tdefs = find_tele(tn)
         ok = bool(srcs)
-        if ok and (sdef or tdef):
+        if ok and (schain or tchain):
             # Links are stored per teleporter, and a group's teleporters belong to its prefab, shared by
             # every instance. Keep only links that come back out exactly as they went in; anything else
             # (e.g. between two instances) is carried through untouched below.
-            shared = sdef and uses.get(sdef, 0) != 1
-            ok = bool(tgts) and not (tdef and places(tplain) != 1 and not (sdef == tdef and sinst == tinst))
-            if sdef and not tdef: ok = ok and not shared
-            if sdef and tdef and sinst != tinst: ok = ok and not shared and uses.get(tdef, 0) == 1
-            if not sdef and tdef: ok = ok and uses.get(tdef, 0) == 1
+            unshared = lambda ds: all(uses.get(d, 0) == 1 for d in ds)
+            ok = bool(tgts) and (schain == tchain or (unshared(sdefs) and unshared(tdefs) and places(tplain) == 1))
         if not ok: raw.append((f, t)); continue
         for o in srcs:
-            if fface == 'f': o.link, o.lface = (tplain if tdef else tn), tface
-            elif fface == 'b': o.blink, o.bface = (tplain if tdef else tn), tface
+            if fface == 'f': o.link, o.lface = (tplain if tchain else tn), tface
+            elif fface == 'b': o.blink, o.bface = (tplain if tchain else tn), tface
     world['rawlinks'] = raw
     return nw, objs, materials, defines, extras, options_text, physics, world
 
@@ -602,8 +601,11 @@ def obj_block(o):
         if o.x or o.y or o.z: ln.append('  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)))
         return ln + ['end']
     if o.t == 'group':
-        ln = ['group %s' % o.name, '  shift %s %s %s' % (num(o.x), num(o.y), num(o.z)),
-              '  rotation %s' % num(o.r)]
+        # Order matters inside a group: BZFlag applies transforms as written, so scale comes first,
+        # then rotation, then shift.
+        ln = ['group %s' % o.name]
+        if (o.sx, o.sy, o.sz) != (1, 1, 1): ln.append('  scale %s %s %s' % (num(o.sx), num(o.sy), num(o.sz)))
+        ln += ['  rotation %s' % num(o.r), '  shift %s %s %s' % (num(o.x), num(o.y), num(o.z))]
         if o.team: ln.append('  team %d' % o.team)
         if tuple(o.tint) != (1.0, 1.0, 1.0, 1.0): ln.append('  tint %s %s %s %s' % tuple(num(c) for c in o.tint))
         if o.phys == 'passable': ln += ['  drivethrough', '  shootthrough']
@@ -674,6 +676,219 @@ def physics_block(p):
     return ln + ['  ' + e for e in p.extra] + ['end']
 
 
+# ---------------------------------------------------------------------------
+# Custom object library
+# ---------------------------------------------------------------------------
+# A library object is an ordinary .bzw file holding meshes (or any other objects), the materials
+# they use, and any 'define' prefabs they need. An optional first-lines comment gives it a menu entry:
+#   #bzmm-object name="Lamp post" category="Street" description="A tall street lamp"
+# Placing one adds its content to the map as a group instance, so many copies share one definition.
+LIB_TAG = '#bzmm-object'
+LIB_SKIP = ('teleporter', 'zone', 'weapon')  # these only make sense inside one particular map
+
+
+def user_library_dir():
+    """The person's own objects folder (Linux ~/.local/share, Windows %APPDATA%, macOS Application Support)."""
+    if sys.platform == 'win32':
+        return os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'BZMapMaker', 'objects')
+    if sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Application Support/BZMapMaker/objects')
+    return os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'bzmapmaker', 'objects')
+
+
+def system_library_dirs():
+    """Read-only folders of objects that came with the program (the .deb installs /usr/share/bzmapmaker/objects)."""
+    here = os.path.dirname(os.path.abspath(__file__)); out = []
+    cands = [os.path.join(p, 'objects') for p in (getattr(sys, '_MEIPASS', None), here) if p]
+    if sys.platform not in ('win32', 'darwin'): cands += ['/usr/local/share/bzmapmaker/objects', '/usr/share/bzmapmaker/objects']
+    for c in cands:
+        c = os.path.abspath(c)
+        if os.path.isdir(c) and c not in out: out.append(c)
+    return out
+
+
+@dataclass
+class LibItem:
+    name: str
+    category: str = 'Other'
+    description: str = ''
+    path: str = ''
+    builtin: bool = False
+
+
+def parse_lib_header(text):
+    for ln in text.splitlines()[:15]:
+        if ln.strip().lower().startswith(LIB_TAG):
+            try: parts = shlex.split(ln.strip()[len(LIB_TAG):])
+            except ValueError: return {}
+            return dict(p.split('=', 1) for p in parts if '=' in p)
+    return {}
+
+
+def lib_header(name, category, description):
+    return '%s name=%s category=%s description=%s' % (LIB_TAG, shlex.quote(name), shlex.quote(category), shlex.quote(description))
+
+
+def lib_slug(name):
+    return re.sub(r'[^a-z0-9_]+', '_', name.lower()).strip('_') or 'object'
+
+
+def scan_library():
+    """Every object in the program's folders and the person's folder; theirs replace same-named built-ins."""
+    found = {}
+    roots = [(d, True) for d in system_library_dirs()] + [(user_library_dir(), False)]
+    for root, builtin in roots:
+        for dirpath, dirs, files in os.walk(root):
+            dirs.sort()
+            for f in sorted(files):
+                if not f.lower().endswith('.bzw'): continue
+                path = os.path.join(dirpath, f)
+                try:
+                    with open(path, encoding='utf-8', errors='replace') as fh: head = fh.read(3000)
+                except OSError: continue
+                meta = parse_lib_header(head)
+                rel = os.path.relpath(dirpath, root)
+                name = meta.get('name') or os.path.splitext(f)[0].replace('_', ' ').replace('-', ' ').strip().title()
+                cat = meta.get('category') or ('Other' if rel == '.' else rel.replace(os.sep, ' / '))
+                found[name.lower()] = LibItem(name, cat, meta.get('description', ''), path, builtin)
+    return sorted(found.values(), key=lambda i: (i.category.lower(), i.name.lower()))
+
+
+_LIBCACHE = {}
+
+
+def load_library_content(path):
+    """(objs, defines, materials) of a library file with the map-specific objects removed, or None."""
+    try:
+        key = (path, os.path.getmtime(path))
+        if key not in _LIBCACHE:
+            with open(path, encoding='utf-8', errors='replace') as fh: text = fh.read()
+            _nw, objs, materials, defines, _x, _o, _p, _w = parse(text)
+            objs = [o for o in objs if o.t not in LIB_SKIP]
+            defines = {n: [k for k in ks if k.t not in LIB_SKIP] for n, ks in defines.items()}
+            _LIBCACHE[key] = (objs, defines, materials)
+        return copy.deepcopy(_LIBCACHE[key])
+    except OSError:
+        return None
+
+
+def _mat_sig(m):
+    return (m.texture, tuple(m.color), tuple(m.extra), tuple(ln for ln in m.raw if ln.split()[:1] != ['name']))
+
+
+def _rename_material_in(objs, mapping):
+    """Point objects at renamed materials (their own fields and the matref lines inside mesh data)."""
+    for o in objs:
+        if o.matref in mapping: o.matref = mapping[o.matref]
+        for k, v in list(o.mats.items()):
+            if v in mapping: o.mats[k] = mapping[v]
+        if o.t == 'mesh' and o.mesh:
+            body = []
+            for ln in MESHDATA.get(o.mesh, []):
+                p = ln.split()
+                if len(p) > 1 and p[0].lower() == 'matref' and p[1] in mapping: ln = 'matref ' + mapping[p[1]]
+                body.append(ln)
+            o.mesh = mesh_register(body)
+
+
+def _materials_used(objs, defines):
+    """Names of every material the objects (and prefabs they use) refer to."""
+    used, seen = set(), set()
+
+    def scan(lst, depth=0):
+        for o in lst:
+            if o.matref: used.add(o.matref)
+            used.update(v for v in o.mats.values() if v)
+            if o.t == 'mesh':
+                for ln in MESHDATA.get(o.mesh, []):
+                    p = ln.split()
+                    if len(p) > 1 and p[0].lower() == 'matref': used.add(p[1])
+            if o.t == 'group' and o.name not in seen and depth <= MAX_NEST and o.name in defines:
+                seen.add(o.name); scan(defines[o.name], depth + 1)
+    scan(objs)
+    return used
+
+
+def library_text(name, category, description, objs, defines, materials):
+    """The .bzw text of a library object: header, the materials it uses, the prefabs it needs, then the objects."""
+    need, order = set(), []
+
+    def visit(dn, depth=0):
+        if dn in need or dn not in defines or depth > MAX_NEST: return
+        need.add(dn)
+        for k in defines[dn]:
+            if k.t == 'group': visit(k.name, depth + 1)
+        order.append(dn)
+    for o in objs:
+        if o.t == 'group': visit(o.name)
+    used = _materials_used(objs, defines)
+    out = [lib_header(name, category, description), '# Made with BZ Map Maker', '']
+    for mn in sorted(used):
+        if mn in materials: out += material_block(materials[mn]) + ['']
+    for dn in order:
+        out.append('define %s' % dn)
+        for k in defines[dn]: out += ['  ' + ln for ln in obj_block(k)]
+        out += ['enddef', '']
+    for o in objs: out += obj_block(o) + ['']
+    return '\n'.join(out)
+
+
+def objs_center(objs, defines):
+    """(x, y) middle of the objects' real extent: meshes by their vertices, groups through their contents."""
+    xs, ys = [], []
+    for leaf, _ in expand(types.SimpleNamespace(objs=list(objs), defines=defines)):
+        if leaf.t == 'mesh':
+            W, _f = mesh_world(leaf); xs += [v[0] for v in W]; ys += [v[1] for v in W]
+        else:
+            xs += [leaf.x - leaf.sx, leaf.x + leaf.sx]; ys += [leaf.y - leaf.sy, leaf.y + leaf.sy]
+    return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2) if xs else (0.0, 0.0)
+
+
+def library_path_for(name, directory=None):
+    """(path, exists-for-this-name) where a person's object called `name` would be saved. A different
+    object that already has that file name pushes this one to name_2.bzw rather than being overwritten."""
+    directory = directory or user_library_dir()
+    base = lib_slug(name); path, i = os.path.join(directory, base + '.bzw'), 1
+    while os.path.exists(path):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as fh: other = parse_lib_header(fh.read(3000)).get('name', '')
+        except OSError: other = ''
+        if other.lower() == name.lower(): return path, True
+        i += 1; path = os.path.join(directory, '%s_%d.bzw' % (base, i))
+    return path, False
+
+
+def save_library_object(name, category, description, objs, defines, materials, directory=None):
+    """Write objs (centred on the origin, map-only objects left out) into the person's library. Returns the path, or None."""
+    objs = copy.deepcopy([o for o in objs if o.t not in LIB_SKIP])
+    if not objs: return None
+    cx, cy = objs_center(objs, defines)
+    for o in objs:
+        o.x -= cx; o.y -= cy; o.fam = o.fam_k = o.fold = 0; o.mode = ''
+    directory = directory or user_library_dir()
+    os.makedirs(directory, exist_ok=True)
+    path, _ = library_path_for(name, directory)
+    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials))
+    _LIBCACHE.clear()
+    return path
+
+
+def import_into_library(src, name, category, description, split=False, directory=None):
+    """Copy the objects (and the materials and prefabs they need) from another .bzw into the library.
+    Returns the list of files written; [] if the file held nothing a library object can be made of."""
+    with open(src, encoding='utf-8', errors='replace') as fh: text = fh.read()
+    _nw, objs, materials, defines, _x, _o, _p, _w = parse(text)
+    objs = [o for o in objs if o.t not in LIB_SKIP]
+    if not objs: return []
+    groups = [[o] for o in objs] if (split and len(objs) > 1) else [objs]
+    out = []
+    for i, grp in enumerate(groups, 1):
+        label = name if len(groups) == 1 else '%s %d' % (name, i)
+        p = save_library_object(label, category, description, grp, defines, materials, directory)
+        if p: out.append(p)
+    return out
+
+
 class Model(QObject):
     changed = pyqtSignal(); selected = pyqtSignal(); reset = pyqtSignal(); warn = pyqtSignal(str)
 
@@ -684,6 +899,7 @@ class Model(QObject):
         s.options_text = ''
         s.physics = {}
         s.world = new_world()  # Objects -> World Settings
+        s.lib_item = None  # the custom object the 'Custom object' tool places
         s.nid, s.sym = 1, 0
         s.tool, s.snap = 'select', True
         s.show_zones = True  # View → Show Zones; zones are editor-only aids and can clutter large maps
@@ -721,18 +937,107 @@ class Model(QObject):
         while 't%d' % j in taken: j += 1
         return 't%d' % j
 
-    def instance_names(s):
-        """BZFlag names a teleporter inside a group instance '<instance name>:<teleporter name>',
-        so each group instance needs its own name. Returns {id(group object): unique name}."""
+    def _scope_names(s, lst):
+        """Unique instance names for the group instances in lst (the map's top level, or the
+        contents of one prefab). BZFlag names a teleporter inside a group instance
+        '<instance>:<teleporter>', and nested instances chain: '<outer>:<inner>:<teleporter>'."""
         out, used = {}, set()
-        for g in s.objs:
+        for g in lst:
             if g.t != 'group': continue
             base = g.iname or g.name or 'group'; n, i = base, 1
             while n in used: i += 1; n = '%s_%d' % (base, i)
             used.add(n); out[id(g)] = n
         return out
 
+    def instance_names(s):
+        return s._scope_names(s.objs)
+
+    def group_has_tele(s, name, depth=0):
+        if depth > MAX_NEST: return False
+        return any((k.t == 'teleporter' and k.name) or (k.t == 'group' and s.group_has_tele(k.name, depth + 1))
+                   for k in s.defines.get(name, []))
+
+    def tele_placements(s):
+        """[(instance-name chain, teleporter)] for every teleporter that will exist in the world,
+        top level ones with an empty chain."""
+        res, cache = [], {}
+
+        def walk(lst, prefix, depth):
+            nm = cache.setdefault(id(lst), s._scope_names(lst))
+            for o in lst:
+                if o.t == 'teleporter':
+                    if o.name: res.append((prefix, o))
+                elif o.t == 'group' and depth < MAX_NEST:
+                    walk(s.defines.get(o.name, []), prefix + (nm[id(o)],), depth + 1)
+        walk(s.objs, (), 0)
+        return res
+
+    def define_contains(s, name, target, depth=0):
+        """True if prefab `name` is `target`, or holds (at any depth) an instance of it."""
+        if name == target: return True
+        if depth > MAX_NEST: return True  # a loop already: treat as contained so nothing new is added to it
+        return any(k.t == 'group' and s.define_contains(k.name, target, depth + 1) for k in s.defines.get(name, []))
+
+    def ordered_defines(s):
+        """Prefabs with the ones other prefabs use written first."""
+        out, seen = [], set()
+
+        def visit(name, depth=0):
+            if name in seen or name not in s.defines or depth > MAX_NEST: return
+            seen.add(name)
+            for k in s.defines[name]:
+                if k.t == 'group': visit(k.name, depth + 1)
+            out.append(name)
+        for name in list(s.defines): visit(name)
+        return out
+
+    def place_library(s, item, x, y):
+        """Add a custom object to the map as a group instance at (x, y). Its materials come along
+        (renamed if the map already has a different one of that name) and its prefabs are added
+        once, so placing it again shares them. Returns the group, or None."""
+        got = load_library_content(item.path)
+        if not got or not got[0]: return None
+        objs, defines, materials = got
+        slug = lib_slug(item.name); rename = {}
+        for name, mat in materials.items():
+            have = s.materials.get(name)
+            if have is None: s.materials[name] = mat; continue
+            if _mat_sig(have) == _mat_sig(mat): continue  # same material already in the map
+            n, i = name, 1
+            while n in s.materials or n in materials: i += 1; n = '%s_%d' % (name, i)
+            mat.name = n; mat.raw = [('name ' + n) if ln.split()[:1] == ['name'] else ln for ln in mat.raw]
+            s.materials[n] = mat; rename[name] = n
+        sig = lambda kids: '\n'.join('\n'.join(obj_block(k)) for k in kids)
+        dmap = {}
+
+        def bring(dn, depth=0):
+            if dn in dmap: return dmap[dn]
+            if dn not in defines or depth > MAX_NEST: return dn
+            dmap[dn] = dn  # a prefab that (wrongly) contains itself stops here
+            kids = defines[dn]; _rename_material_in(kids, rename)
+            for k in kids:
+                if k.t == 'group': k.name = bring(k.name, depth + 1)
+            base = n = '%s__%s' % (slug, dn); i = 1
+            while n in s.defines and sig(s.defines[n]) != sig(kids): i += 1; n = '%s_%d' % (base, i)
+            s.defines.setdefault(n, kids); dmap[dn] = n
+            return n
+        _rename_material_in(objs, rename)
+        for o in objs:
+            if o.t == 'group': o.name = bring(o.name)
+        if len(objs) == 1 and objs[0].t == 'group':
+            g = objs[0]; g.x += x; g.y += y
+        else:
+            base = n = slug; i = 1
+            while n in s.defines and sig(s.defines[n]) != sig(objs): i += 1; n = '%s_%d' % (base, i)
+            s.defines.setdefault(n, objs)
+            g = Obj('group', x, y, 0, 1, 1, 1, 0, 0, n)
+        g.iname = ''; g.fam = g.fam_k = g.fold = 0; g.mode = ''
+        g.uid = s.nid; s.nid += 1
+        s.objs.append(g)
+        return g
+
     def add(s, t, x, y):
+        if t == 'library': return s.place_library(s.lib_item, x, y) if s.lib_item else None
         o = Obj(t, x, y, 0, *DEF[t]); o.uid = s.nid; s.nid += 1
         if t == 'teleporter':
             o.name = s.free_tele_name()
@@ -762,14 +1067,19 @@ class Model(QObject):
         return len(new)
 
     def group_bounds(s, name):
-        kids = s.defines.get(name, [])
-        if not kids: return 10, 10
-        xs = [abs(k.x) + k.sx for k in kids]; ys = [abs(k.y) + k.sy for k in kids]
-        return max(xs + [5]), max(ys + [5])
+        leaves = expand_group(s, Obj('group', 0, 0, 0, 1, 1, 1, 0, 0, name))
+        if not leaves: return 10, 10
+        xs, ys = [5], [5]
+        for k in leaves:
+            if k.t == 'mesh':
+                W, _ = mesh_world(k); xs += [abs(v[0]) for v in W]; ys += [abs(v[1]) for v in W]
+            else:
+                xs.append(abs(k.x) + k.sx); ys.append(abs(k.y) + k.sy)
+        return max(xs), max(ys)
 
     # ---- symmetry families ---------------------------------------------------
     def make_family(s, o):
-        if not s.sym or o.fam or o.t == 'mesh': return
+        if o is None or not s.sym or o.fam or o.t == 'mesh': return
         mode, fold = SYM_DEFS[s.sym]
         s.nid += 0
         fam = 'f%d' % o.uid
@@ -925,24 +1235,33 @@ class Model(QObject):
         return g
 
     def add_to_group(s, grp, obj):
-        """Move an existing top-level object into an existing group's prefab, converting
-        its position into the group's local frame (undoing the group's own shift/rotation)
-        so it doesn't visually move. Returns False if either argument isn't valid for this."""
-        if grp.t != 'group' or obj.t == 'group' or obj is grp or obj not in s.objs: return False
+        """Move an existing top-level object (a group instance too: groups nest) into an existing
+        group's prefab, converting it into the group's local frame (undoing the group's own scale,
+        rotation and shift) so it doesn't visually move. Returns False if that isn't possible,
+        including when it would make a prefab contain itself."""
+        if grp.t != 'group' or obj is grp or obj not in s.objs: return False
+        if obj.t == 'group' and s.define_contains(obj.name, grp.name): return False
         a = math.radians(-grp.r); c, sn = math.cos(a), math.sin(a)
         dx, dy = obj.x - grp.x, obj.y - grp.y
         kid = replace(obj)
-        kid.x, kid.y, kid.z = dx * c - dy * sn, dx * sn + dy * c, obj.z - grp.z
+        kid.x, kid.y, kid.z = (dx * c - dy * sn) / (grp.sx or 1), (dx * sn + dy * c) / (grp.sy or 1), (obj.z - grp.z) / (grp.sz or 1)
         kid.r = (obj.r - grp.r) % 360
+        if obj.t == 'group': kid.sx, kid.sy, kid.sz = obj.sx / (grp.sx or 1), obj.sy / (grp.sy or 1), obj.sz / (grp.sz or 1)
+        elif obj.t == 'mesh': pass
+        else:
+            t = math.radians(kid.r); ct, st = math.cos(t), math.sin(t)
+            kid.sx = obj.sx / (math.hypot((grp.sx or 1) * ct, (grp.sy or 1) * st) or 1)
+            kid.sy = obj.sy / (math.hypot((grp.sx or 1) * st, (grp.sy or 1) * ct) or 1)
+            kid.sz = obj.sz / (grp.sz or 1)
         kid.fam = kid.fam_k = kid.fold = 0; kid.mode = ''
         s.defines.setdefault(grp.name, []).append(kid)
         s.objs.remove(obj)
         return True
 
     def group_selection(s):
-        """Ctrl+G. If exactly one of the selected objects is already a group, everything
-        else selected is added into it. Otherwise all selected non-group objects are
-        wrapped into a single new prefab + group instance at their centroid."""
+        """Ctrl+G. If exactly one of the selected objects is a group and others are selected too,
+        the others are added into it. Otherwise everything selected (groups included, since groups
+        nest) is wrapped into a single new prefab + group instance at its centroid."""
         sel = s.msel or ([s.sel] if s.sel else [])
         groups = [o for o in sel if o.t == 'group']; plain = [o for o in sel if o.t != 'group']
         if not sel: return None
@@ -952,9 +1271,9 @@ class Model(QObject):
             for o in plain: s.add_to_group(g, o)
             s.msel = []; s.select(g); s.changed.emit()
             return g.name
-        if not plain: return None
-        g = s.make_group(plain)
-        for o in plain:
+        if len(sel) < 2 and not plain: return None
+        g = s.make_group(sel)
+        for o in sel:
             s.objs.remove(o)
         s.objs.append(g)
         s.msel = []; s.select(g); s.changed.emit()
@@ -976,63 +1295,94 @@ class Model(QObject):
         for pd in s.physics.values(): out += physics_block(pd) + ['']
         for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
-        for name, kids in s.defines.items():
+        for name in s.ordered_defines():
             out.append('define %s' % name)
-            for kd in kids: out += ['  ' + ln for ln in obj_block(kd)]
+            nm = s._scope_names(s.defines[name])
+            for kd in s.defines[name]:
+                blk = obj_block(kd)
+                if kd.t == 'group' and s.group_has_tele(kd.name): blk.insert(1, '  name %s' % nm[id(kd)])
+                out += ['  ' + ln for ln in blk]
             out += ['enddef', '']
         eff = s.instance_names()
-        has_tele = lambda g: any(k.t == 'teleporter' and k.name for k in s.defines.get(g.name, []))
         for o in s.objs:
             if o.fam:  # a plain, harmless comment to everything else that reads this file --
                        # only this editor looks for it, to restore symmetry linkage on reopen
                 out.append('#bzmm-sym fam=%s k=%d fold=%d mode=%s' % (o.fam, o.fam_k, o.fold, o.mode))
             blk = obj_block(o)
-            if o.t == 'group' and has_tele(o): blk.insert(1, '  name %s' % eff[id(o)])  # names its teleporters for links
+            if o.t == 'group' and s.group_has_tele(o.name): blk.insert(1, '  name %s' % eff[id(o)])  # names its teleporters for links
             out += blk + ['']
-        top = {o.name for o in s.objs if o.t == 'teleporter'}
-        where = {}  # teleporter name -> names of the group instances whose prefab holds one
-        for g in s.objs:
-            if g.t == 'group':
-                for k in s.defines.get(g.name, []):
-                    if k.t == 'teleporter' and k.name: where.setdefault(k.name, []).append(eff[id(g)])
+        pls = s.tele_placements()
+        full_of = lambda prefix, k: ':'.join(prefix + (k.name,))
 
-        def full(name, inst=None):
-            """BZW name of a link target, seen from inside group instance `inst` (None = top level)."""
-            if inst and inst in where.get(name, []): return '%s:%s' % (inst, name)
-            if name in top: return name
-            w = where.get(name)
-            if w: return '%s:%s' % (w[0], name) if len(w) == 1 else '*:' + name
-            return name
+        def full(tgt, prefix):
+            """BZW name of the teleporter called tgt, as seen from the instance chain `prefix`: the
+            nearest one wins; if several instances tie, a wildcard lets BZFlag pick one."""
+            cands = [(p, k) for p, k in pls if k.name == tgt]
+            if not cands: return tgt
+            def shared(p):
+                n = 0
+                for a, c in zip(p, prefix):
+                    if a != c: break
+                    n += 1
+                return n
+            best = max(shared(p) for p, _ in cands); near = [c for c in cands if shared(c[0]) == best]
+            if len(near) == 1: return full_of(*near[0])
+            return tgt if all(not p for p, _ in near) else '*:' + tgt
 
-        def emit(src, o, inst):
-            for face, tgt, other in (('f', o.link, o.lface), ('b', o.blink, o.bface)):
-                if tgt: out.extend(['link', '  from %s:%s' % (src, face), '  to %s:%s' % (full(tgt, inst), other), 'end', ''])
-        for o in s.objs:
-            if o.t == 'teleporter': emit(o.name, o, None)
-            elif o.t == 'group':
-                for k in s.defines.get(o.name, []):
-                    if k.t == 'teleporter' and k.name: emit('%s:%s' % (eff[id(o)], k.name), k, eff[id(o)])
+        for prefix, k in pls:
+            for face, tgt, other in (('f', k.link, k.lface), ('b', k.blink, k.bface)):
+                if tgt: out.extend(['link', '  from %s:%s' % (full_of(prefix, k), face),
+                                    '  to %s:%s' % (full(tgt, prefix), other), 'end', ''])
         for f, t in s.world.get('rawlinks', []): out.extend(['link', '  from %s' % f, '  to %s' % t, 'end', ''])
         return '\n'.join(out)
 
 
+MAX_NEST = 12  # deepest group-in-group chain followed (also stops a group that contains itself)
+
+
+def _place(kd, g):
+    """kd (an object inside group instance g's prefab) placed into g's parent frame.
+    A group's transform is scale, then rotation about Z, then shift. A non-uniform scale on a
+    rotated child can't be a plain box, so child sizes are scaled along the child's own axes."""
+    a = math.radians(g.r); c, sn = math.cos(a), math.sin(a)
+    px, py, pz = kd.x * g.sx, kd.y * g.sy, kd.z * g.sz
+    leaf = replace(kd)
+    leaf.x, leaf.y, leaf.z = g.x + px * c - py * sn, g.y + px * sn + py * c, g.z + pz
+    leaf.r = (kd.r + g.r) % 360
+    if kd.t == 'mesh':  # a mesh keeps its own geometry; the chain's scale and shift go on the leaf
+        leaf.sx = leaf.sy = leaf.sz = 0
+        leaf.mscale = (g.sx * kd.mscale[0], g.sy * kd.mscale[1], g.sz * kd.mscale[2])
+    elif kd.t == 'group':  # a nested instance: compose the two transforms (exact unless g scales X/Y unequally)
+        leaf.sx, leaf.sy, leaf.sz = kd.sx * g.sx, kd.sy * g.sy, kd.sz * g.sz
+        if g.team: leaf.team = g.team  # the outer group's team override wins
+    else:
+        t = math.radians(kd.r); ct, st = math.cos(t), math.sin(t)
+        leaf.sx = kd.sx * math.hypot(g.sx * ct, g.sy * st)
+        leaf.sy = kd.sy * math.hypot(g.sx * st, g.sy * ct)
+        leaf.sz = kd.sz * g.sz
+        if leaf.t == 'base' and g.team: leaf.team = g.team
+    return leaf
+
+
+def expand_group(model, g, depth=0):
+    """Every plain object inside group instance g (nested groups followed), in g's parent frame."""
+    out = []
+    if depth > MAX_NEST: return out
+    for kd in model.defines.get(g.name, []):
+        leaf = _place(kd, g)
+        if kd.t == 'group': out += expand_group(model, leaf, depth + 1)
+        else: out.append(leaf)
+    return out
+
+
 def expand(model):
-    """Yield (leaf, source) pairs: for a plain object, leaf is o itself; for a group
-    instance, one leaf per child in its prefab, transformed into world space. Groups
-    cannot contain other groups."""
+    """Yield (leaf, source) pairs: for a plain object, leaf is o itself; for a group instance,
+    one leaf per object in its prefab (and in any groups nested inside it), transformed into
+    world space. Groups may contain other groups; a define may not contain a define."""
     out = []
     for o in model.objs:
         if o.t == 'group':
-            a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
-            for kd in model.defines.get(o.name, []):
-                leaf = replace(kd)
-                leaf.x, leaf.y = o.x + kd.x * c - kd.y * sn, o.y + kd.x * sn + kd.y * c
-                leaf.z, leaf.r = o.z + kd.z, (kd.r + o.r) % 360
-                if leaf.t == 'base' and o.team: leaf.team = o.team
-                if leaf.t == 'mesh':  # kept as: (mesh + its own shift), turned by the group, then shifted
-                    leaf.sx, leaf.sy, leaf.sz = kd.x, kd.y, kd.z
-                    leaf.x, leaf.y, leaf.z = o.x, o.y, o.z
-                out.append((leaf, o))
+            out += [(leaf, o) for leaf in expand_group(model, o)]
         else:
             out.append((o, o))
     return out
@@ -1048,6 +1398,7 @@ def cpen(color, w=1, style=Qt.PenStyle.SolidLine):
 HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select for grouping, or Shift+drag a box '
                    '(Ctrl+Shift+drag adds to the selection), then Ctrl+G. '
                    'Drag empty space or use the right mouse button to pan; scroll to zoom.',
+        'library': 'Click to place the chosen custom object as a group (choose another from Objects > Custom Objects).',
         'box': 'Drag corner to corner, or click for a default box.',
         'pyramid': 'Drag corner to corner, or click for a default pyramid.',
         'base': 'Click to place a base, then set its team in the panel.',
@@ -1818,6 +2169,91 @@ def average_color(img):
     return (r / n / 255, g / n / 255, b / n / 255, 1.0)
 
 
+class ObjectInfoDialog(QDialog):
+    """Name, category and description for a new library object."""
+
+    def __init__(s, parent, title, name='', categories=(), description='', allow_split=False):
+        super().__init__(parent); s.setWindowTitle(title); s.resize(440, 0)
+        lay = QVBoxLayout(s); form = QFormLayout(); lay.addLayout(form)
+        s.name = QLineEdit(name); form.addRow('Name', s.name)
+        s.cat = QComboBox(); s.cat.setEditable(True)
+        s.cat.addItems(sorted(set(categories) | {'My Objects'}, key=str.lower)); s.cat.setCurrentText('My Objects')
+        form.addRow('Category', s.cat)
+        s.desc = QLineEdit(description); s.desc.setPlaceholderText('optional, shown as a tooltip'); form.addRow('Description', s.desc)
+        s.split = QCheckBox('The file holds several parts: make a separate object from each one')
+        s.split.setVisible(allow_split); lay.addWidget(s.split)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(s.check); bb.rejected.connect(s.reject); lay.addWidget(bb)
+
+    def check(s):
+        if not s.name.text().strip():
+            QMessageBox.information(s, 'Name needed', 'Please give the object a name.'); return
+        s.accept()
+
+    def values(s):
+        return s.name.text().strip(), s.cat.currentText().strip() or 'My Objects', s.desc.text().strip(), s.split.isChecked()
+
+
+class LibraryDialog(QDialog):
+    """Browse the custom object library: search, pick one to place, or manage your own."""
+
+    def __init__(s, win):
+        super().__init__(win); s.win, s.items = win, []
+        s.setWindowTitle('Custom Objects'); s.resize(540, 480)
+        lay = QVBoxLayout(s)
+        s.search = QLineEdit(); s.search.setPlaceholderText('Search by name, category or description')
+        s.search.textChanged.connect(s.fill); lay.addWidget(s.search)
+        s.list = QListWidget(); s.list.currentRowChanged.connect(s.show_info)
+        s.list.itemDoubleClicked.connect(lambda _item: s.place()); lay.addWidget(s.list, 1)
+        s.info = QLabel(); s.info.setWordWrap(True); lay.addWidget(s.info)
+        r1 = QHBoxLayout(); lay.addLayout(r1)
+        s.place_btn = QPushButton('Place in Map'); s.place_btn.clicked.connect(s.place); r1.addWidget(s.place_btn)
+        s.remove_btn = QPushButton('Remove from My Objects'); s.remove_btn.clicked.connect(s.remove); r1.addWidget(s.remove_btn)
+        r1.addStretch(1)
+        r2 = QHBoxLayout(); lay.addLayout(r2)
+        for label, fn in (('Import into My Objects...', lambda: (s.win.library_import(), s.fill())),
+                          ('Save Selection to My Objects...', lambda: (s.win.library_save_selection(), s.fill())),
+                          ('Open My Objects Folder', s.win.library_open_folder)):
+            b = QPushButton(label); b.clicked.connect(lambda _c=False, fn=fn: fn()); r2.addWidget(b)
+        r2.addStretch(1)
+        close = QPushButton('Close'); close.clicked.connect(s.accept); r2.addWidget(close)
+        s.fill()
+
+    def fill(s):
+        q = s.search.text().strip().lower()
+        s.items = [i for i in scan_library() if q in ' '.join((i.name, i.category, i.description)).lower()]
+        s.list.clear()
+        for i in s.items: s.list.addItem('%s  /  %s%s' % (i.category, i.name, '' if i.builtin else '   (mine)'))
+        if s.items: s.list.setCurrentRow(0)
+        else: s.show_info(-1)
+
+    def current(s):
+        row = s.list.currentRow()
+        return s.items[row] if 0 <= row < len(s.items) else None
+
+    def show_info(s, _row=None):
+        it = s.current()
+        s.place_btn.setEnabled(bool(it)); s.remove_btn.setEnabled(bool(it) and not it.builtin)
+        if not it:
+            s.info.setText('No custom objects found. Use "Import into My Objects..." to add one.' if not s.items else '')
+            return
+        s.info.setText((it.description or 'No description.') + '\n' +
+                       ('Comes with BZ Map Maker.' if it.builtin else 'In your own objects folder.'))
+
+    def place(s):
+        it = s.current()
+        if it: s.win.pick_library(it); s.accept()
+
+    def remove(s):
+        it = s.current()
+        if not it or it.builtin: return
+        if QMessageBox.question(s, 'Remove object', 'Remove "%s" from your objects? Maps that already use it are not affected.' % it.name) \
+                != QMessageBox.StandardButton.Yes: return
+        try: os.remove(it.path)
+        except OSError as e: QMessageBox.warning(s, 'Could not remove', str(e))
+        _LIBCACHE.clear(); s.fill()
+
+
 class OptionsDialog(QDialog):
     """The map's 'options' block: raw BZFS command-line text, written out exactly as typed.
     There's no real structure to this block (see wiki.bzflag.org/Options_(object)) -- it's
@@ -2161,6 +2597,7 @@ class Win(QMainWindow):
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
+        s.lib_menu = ob.addMenu('Custom Objects'); s.lib_menu.aboutToShow.connect(s.fill_library_menu)
         s.act(ob, 'World Settings...', s.open_world)
         s.act(ob, 'Map Options...', s.open_options)
         s.act(ob, 'Physics Drivers...', s.open_physics)
@@ -2184,6 +2621,9 @@ class Win(QMainWindow):
         for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
             a.triggered.connect(lambda _, t=t: setattr(s.m, 'tool', t)); g.addAction(a); tb.addAction(a)
+        s.lib_action = QAction('Custom object', s); s.lib_action.setCheckable(True); s.lib_action.setEnabled(False)
+        s.lib_action.setToolTip('The custom object chosen from Objects > Custom Objects')
+        s.lib_action.triggered.connect(lambda _: setattr(s.m, 'tool', 'library')); g.addAction(s.lib_action); tb.addAction(s.lib_action)
         tb.addSeparator(); sn = QAction('Snap to 5', s); sn.setCheckable(True); sn.setChecked(True)
         sn.toggled.connect(lambda v: setattr(s.m, 'snap', v)); tb.addAction(sn)
         tb.addSeparator(); sy = QComboBox(); sy.addItems(SYM_LABELS)
@@ -2357,6 +2797,7 @@ class Win(QMainWindow):
         o = s.current_obj()
         if s.busy or not o: return
         if not s.pushed: s.m.push(); s.pushed = True
+        if o.t == 'group' and k in ('sx', 'sy', 'sz') and abs(v) < 0.01: v = 0.01  # a zero scale would collapse the group
         setattr(o, k, v)
         if not s.editing_member and k not in ('link', 'blink', 'lface', 'bface', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
@@ -2395,8 +2836,8 @@ class Win(QMainWindow):
             s.member_combo.addItems(['%d: %s%s' % (i, k.t, ' ' + k.name if k.name else '') for i, k in enumerate(kids)])
             want = (s.editing_member[1] + 1) if (s.editing_member and s.editing_member[0] is grp) else 0
             if want < s.member_combo.count(): s.member_combo.setCurrentIndex(want)
-        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('group', 'mesh', 'weapon'),
-                'sy': o and o.t not in ('group', 'mesh', 'weapon'), 'sz': o and o.t not in ('group', 'mesh', 'weapon'),
+        rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('mesh', 'weapon'),
+                'sy': o and o.t not in ('mesh', 'weapon'), 'sz': o and o.t not in ('mesh', 'weapon'),
                 'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
                 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
@@ -2423,6 +2864,8 @@ class Win(QMainWindow):
                       'match_color_btn': s.match_color_btn, 'mirror_phys_btn': s.mirror_phys_btn,
                       'tintrow': s.tint_widget}[name]
             row = s.dock.widget().layout().labelForField(widget)
+            if row and name in ('sx', 'sy', 'sz'):  # a group's 'size' is its scale
+                row.setText({'sx': 'Scale X', 'sy': 'Scale Y', 'sz': 'Scale Z'}[name] if o and o.t == 'group' else dict(s.FIELDS)[name])
             widget.setVisible(bool(vis))
             if row: row.setVisible(bool(vis))
         lay = s.dock.widget().layout()
@@ -2507,6 +2950,82 @@ class Win(QMainWindow):
 
     def open_physics(s):
         PhysicsDialog(s.m).exec()
+
+    # ---- custom object library ----------------------------------------------------
+    def fill_library_menu(s):
+        """Rebuilt each time the menu opens, so objects added or removed show up without a restart."""
+        m = s.lib_menu; m.clear(); items = scan_library(); cats = {}
+        for it in items: cats.setdefault(it.category, []).append(it)
+        for cat in sorted(cats, key=str.lower):
+            sub = m.addMenu(cat)
+            for it in cats[cat]:
+                a = sub.addAction(it.name + ('' if it.builtin else '  (mine)'))
+                a.setStatusTip(it.description); a.setToolTip(it.description)
+                a.triggered.connect(lambda _c=False, it=it: s.pick_library(it))
+        if not items: m.addAction('No custom objects found').setEnabled(False)
+        m.addSeparator()
+        for label, fn in (('Browse Library...', s.open_library), ('Import into My Objects...', s.library_import),
+                          ('Save Selection to My Objects...', s.library_save_selection),
+                          ('Open My Objects Folder', s.library_open_folder)):
+            m.addAction(label).triggered.connect(lambda _c=False, fn=fn: fn())
+
+    def pick_library(s, item):
+        """Make `item` the object the next click in either view places."""
+        s.m.lib_item = item; s.m.tool = 'library'
+        s.lib_action.setText('Place: ' + item.name); s.lib_action.setEnabled(True); s.lib_action.setChecked(True)
+        s.statusBar().showMessage(HINT['library'], 8000)
+
+    def open_library(s):
+        LibraryDialog(s).exec()
+
+    def library_open_folder(s):
+        d = user_library_dir(); os.makedirs(d, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+
+    def _confirm_replace(s, name):
+        _p, exists = library_path_for(name)
+        return not exists or QMessageBox.question(s, 'Replace object', 'You already have an object called "%s". Replace it?' % name) \
+            == QMessageBox.StandardButton.Yes
+
+    def library_import(s):
+        """Copy the objects in another .bzw (with the materials they use) into your own library."""
+        folder = os.path.dirname(s.m.path) if s.m.path else ''
+        path, _ = QFileDialog.getOpenFileName(s, 'Import into My Objects', folder, 'BZFlag world files (*.bzw);;All files (*)')
+        if not path: return
+        default = os.path.splitext(os.path.basename(path))[0].replace('_', ' ').replace('-', ' ').strip().title()
+        dlg = ObjectInfoDialog(s, 'Import into My Objects', default, {i.category for i in scan_library()}, allow_split=True)
+        if not dlg.exec(): return
+        name, cat, desc, split = dlg.values()
+        if not split and not s._confirm_replace(name): return
+        try: made = import_into_library(path, name, cat, desc, split)
+        except OSError as e:
+            QMessageBox.warning(s, 'Import failed', str(e)); return
+        if not made:
+            QMessageBox.information(s, 'Nothing to import', 'That file has no meshes, boxes or groups to make an object from. '
+                                    '(Teleporters, zones and weapons only make sense in one particular map, so they are left out.)'); return
+        s.statusBar().showMessage('Added %d object%s to My Objects. Find %s under Objects > Custom Objects.' %
+                                  (len(made), '' if len(made) == 1 else 's', 'it' if len(made) == 1 else 'them'), 10000)
+
+    def library_save_selection(s):
+        """Save what is selected in the map as a reusable object in your own library."""
+        sel = s.m.msel or ([s.m.sel] if s.m.sel else [])
+        if not sel:
+            QMessageBox.information(s, 'Save to My Objects', 'Select the object first (click it, or Ctrl+click several), then try again.'); return
+        usable = [o for o in sel if o.t not in LIB_SKIP]
+        if not usable:
+            QMessageBox.information(s, 'Save to My Objects', 'Teleporters, zones and weapons only make sense in one particular map, '
+                                    'so they cannot be saved as library objects.'); return
+        default = usable[0].name.replace('_', ' ').title() if len(usable) == 1 and usable[0].t == 'group' else ''
+        dlg = ObjectInfoDialog(s, 'Save to My Objects', default, {i.category for i in scan_library()})
+        if not dlg.exec(): return
+        name, cat, desc, _split = dlg.values()
+        if not s._confirm_replace(name): return
+        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials)
+        except OSError as e:
+            QMessageBox.warning(s, 'Save failed', str(e)); return
+        msg = 'Saved "%s" to My Objects.' % name
+        if len(usable) < len(sel): msg += ' (Teleporters, zones and weapons were left out.)'
+        s.statusBar().showMessage(msg, 8000)
 
     def import_mesh(s):
         """Pull one or more 'mesh ... end' objects out of another .bzw (or a file that's
