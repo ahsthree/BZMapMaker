@@ -10,8 +10,11 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 **Current release: 1.4.4** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
-[![Screenshot From 2026-09-30 19-43-21](https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006)](https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006)
-[![Screenshot From 2026-09-30 19-44-01](https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a)](https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a)
+<img width="1920" height="1051" alt="image" src="https://github.com/user-attachments/assets/1f409e95-d424-43ab-9e68-90c8259c4338" />
+
+
+<img width="1254" height="1254" alt="BZMM Arena Blueprint" src="https://github.com/user-attachments/assets/d27219f6-82ff-48df-8fba-e7eccabb5e88" />
+
 
 ## What's new in 1.4.4
 
