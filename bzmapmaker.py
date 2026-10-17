@@ -8,12 +8,12 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, math, json, hashlib
 
-__version__ = '1.4.2'
+__version__ = '1.4.4'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
-                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage)
+                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
@@ -70,6 +70,8 @@ class Obj:
     x: float = 0; y: float = 0; z: float = 0
     sx: float = 1; sy: float = 1; sz: float = 1
     r: float = 0; team: int = 1; name: str = ''; link: str = ''; blink: str = ''
+    iname: str = ''  # group instance name (BZW 'name' line in a group block); teleporters inside are named <iname>:<name>
+    lface: str = 'b'; bface: str = 'f'  # teleporter: face of the link target you emerge from (front link -> its back, back link -> its front, unless changed)
     matref: str = ''
     phydrv: str = ''  # box/pyramid/arc/cone: name of a physics driver, if any
     ricochet: bool = False  # box/pyramid/arc/cone/group: shots bounce off instead of exploding
@@ -469,6 +471,7 @@ def parse(text):
             go.phys = 'passable' if (hd and hs) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
             go.matref = (v.get('matref') or [''])[0]
             go.phydrv = (v.get('phydrv') or [''])[0]
+            go.iname = ' '.join(v.get('name') or [])
             apply_meta(go, line_meta)
             objs.append(go)
         elif k in ('box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
@@ -522,17 +525,53 @@ def parse(text):
 
     def resolve(ident, default_face):
         name, sep, face = ident.rpartition(':')
-        if not sep: name, face = ident, default_face
+        if not sep or face.lower() not in ('f', 'b', '*', ''): name, face = ident, default_face  # no face given, or 'inst:tele'
         face = face.lower() or default_face
         if name.isdigit() and 0 <= int(name) < len(tele_order): name = tele_order[int(name)].name
         return name, face
 
+    inst = {g.iname: g.name for g in objs if g.t == 'group' and g.iname}
+
+    uses = {}
+    for g in objs:
+        if g.t == 'group': uses[g.name] = uses.get(g.name, 0) + 1
+
+    def find_tele(name):
+        """Teleporters a link endpoint names: top-level ones, or one inside a group instance
+        (written <instance name>:<teleporter name>). Returns (teleporters, plain name, prefab, instance)."""
+        top = [o for o in objs if o.t == 'teleporter' and o.name == name]
+        if top: return top, name, None, None
+        for i, ch in enumerate(name):
+            if ch == ':' and name[:i] in inst:
+                kids = [k for k in defines.get(inst[name[:i]], []) if k.t == 'teleporter' and k.name == name[i + 1:]]
+                if kids: return kids, name[i + 1:], inst[name[:i]], name[:i]
+        return [], name, None, None
+
+    def places(name):  # how many places hold a teleporter with this plain name
+        return sum(1 for o in objs if o.t == 'teleporter' and o.name == name) + \
+               sum(1 for ks in defines.values() if any(k.t == 'teleporter' and k.name == name for k in ks))
+
+    raw = []
     for f, t in links:
-        fn, fface = resolve(f, 'f'); tn, _ = resolve(t, 'b')
-        for o in objs:
-            if o.t == 'teleporter' and o.name == fn:
-                if fface == 'f': o.link = tn
-                elif fface == 'b': o.blink = tn
+        fn, fface = resolve(f, 'f')
+        tn, tface = resolve(t, 'b' if fface == 'f' else 'f')
+        if tface not in ('f', 'b'): tface = 'b' if fface == 'f' else 'f'
+        srcs, _, sdef, sinst = find_tele(fn); tgts, tplain, tdef, tinst = find_tele(tn)
+        ok = bool(srcs)
+        if ok and (sdef or tdef):
+            # Links are stored per teleporter, and a group's teleporters belong to its prefab, shared by
+            # every instance. Keep only links that come back out exactly as they went in; anything else
+            # (e.g. between two instances) is carried through untouched below.
+            shared = sdef and uses.get(sdef, 0) != 1
+            ok = bool(tgts) and not (tdef and places(tplain) != 1 and not (sdef == tdef and sinst == tinst))
+            if sdef and not tdef: ok = ok and not shared
+            if sdef and tdef and sinst != tinst: ok = ok and not shared and uses.get(tdef, 0) == 1
+            if not sdef and tdef: ok = ok and uses.get(tdef, 0) == 1
+        if not ok: raw.append((f, t)); continue
+        for o in srcs:
+            if fface == 'f': o.link, o.lface = (tplain if tdef else tn), tface
+            elif fface == 'b': o.blink, o.bface = (tplain if tdef else tn), tface
+    world['rawlinks'] = raw
     return nw, objs, materials, defines, extras, options_text, physics, world
 
 
@@ -611,7 +650,8 @@ def new_world():
     """Settings for the 'world' block other than its size (which lives in Model.W).
     flagheight None = not set, so BZFlag's own default applies and nothing is written.
     `extra` keeps any parameter this editor doesn't know about, so it survives a round trip."""
-    return {'name': '', 'flagheight': None, 'nowalls': False, 'freectf': False, 'extra': []}
+    return {'name': '', 'flagheight': None, 'nowalls': False, 'freectf': False, 'extra': [],
+            'rawlinks': []}  # links the editor can't model (wildcards, links between group instances): kept verbatim
 
 
 def world_block(w, size):
@@ -669,12 +709,33 @@ class Model(QObject):
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
 
+    def tele_names(s):
+        """Every teleporter name in the map: top-level ones and ones inside group prefabs."""
+        seen = [o.name for o in s.objs if o.t == 'teleporter']
+        for kids in s.defines.values():
+            seen += [k.name for k in kids if k.t == 'teleporter']
+        return list(dict.fromkeys(seen))
+
+    def free_tele_name(s, extra=()):
+        taken = set(s.tele_names()) | {z.name for z in extra}; j = 1
+        while 't%d' % j in taken: j += 1
+        return 't%d' % j
+
+    def instance_names(s):
+        """BZFlag names a teleporter inside a group instance '<instance name>:<teleporter name>',
+        so each group instance needs its own name. Returns {id(group object): unique name}."""
+        out, used = {}, set()
+        for g in s.objs:
+            if g.t != 'group': continue
+            base = g.iname or g.name or 'group'; n, i = base, 1
+            while n in used: i += 1; n = '%s_%d' % (base, i)
+            used.add(n); out[id(g)] = n
+        return out
+
     def add(s, t, x, y):
         o = Obj(t, x, y, 0, *DEF[t]); o.uid = s.nid; s.nid += 1
         if t == 'teleporter':
-            i = 1
-            while any(q.name == 't%d' % i for q in s.objs): i += 1
-            o.name = 't%d' % i
+            o.name = s.free_tele_name()
         s.objs.append(o); return o
 
     def select(s, o):
@@ -717,9 +778,7 @@ class Model(QObject):
         for k in range(1, fold):
             q = replace(o); q.uid = s.nid; s.nid += 1; q.fam_k = k; q.link = q.blink = ''
             if q.t == 'teleporter':
-                j = 1
-                while any(z.name == 't%d' % j for z in s.objs + created): j += 1
-                q.name = 't%d' % j
+                q.name = s.free_tele_name(created)
             s.objs.append(q); created.append(q)
         s._sync(o, created)
         keep, seenxy = [o], {(round(o.x, 2), round(o.y, 2))}
@@ -786,6 +845,7 @@ class Model(QObject):
         n = len(ordered)
         for i, m in enumerate(ordered):
             m.link = ordered[(i + 1) % n].name; m.blink = ordered[(i - 1) % n].name
+            m.lface, m.bface = 'b', 'f'
 
     def family_of(s, o):
         return [q for q in s.objs if o.fam and q.fam == o.fam]
@@ -829,6 +889,10 @@ class Model(QObject):
         for o in s.objs:
             if o.link in names: o.link = ''
             if o.blink in names: o.blink = ''
+        for kids in s.defines.values():
+            for k in kids:
+                if k.link in names: k.link = ''
+                if k.blink in names: k.blink = ''
         s.sel = None; s.msel = []; s.selected.emit(); s.changed.emit()
 
     def duplicate(s):
@@ -840,9 +904,7 @@ class Model(QObject):
         c = replace(s.sel); c.uid = s.nid; s.nid += 1; c.x += 10; c.y -= 10
         c.fam = c.fam_k = c.fold = 0; c.mode = ''; c.link = c.blink = ''
         if c.t == 'teleporter':
-            j = 1
-            while any(z.name == 't%d' % j for z in s.objs): j += 1
-            c.name = 't%d' % j
+            c.name = s.free_tele_name()
         s.objs.append(c); s.make_family(c); s.select(c); s.changed.emit()
 
     def make_group(s, objs, name_hint='group'):
@@ -918,15 +980,39 @@ class Model(QObject):
             out.append('define %s' % name)
             for kd in kids: out += ['  ' + ln for ln in obj_block(kd)]
             out += ['enddef', '']
+        eff = s.instance_names()
+        has_tele = lambda g: any(k.t == 'teleporter' and k.name for k in s.defines.get(g.name, []))
         for o in s.objs:
             if o.fam:  # a plain, harmless comment to everything else that reads this file --
                        # only this editor looks for it, to restore symmetry linkage on reopen
                 out.append('#bzmm-sym fam=%s k=%d fold=%d mode=%s' % (o.fam, o.fam_k, o.fold, o.mode))
-            out += obj_block(o) + ['']
+            blk = obj_block(o)
+            if o.t == 'group' and has_tele(o): blk.insert(1, '  name %s' % eff[id(o)])  # names its teleporters for links
+            out += blk + ['']
+        top = {o.name for o in s.objs if o.t == 'teleporter'}
+        where = {}  # teleporter name -> names of the group instances whose prefab holds one
+        for g in s.objs:
+            if g.t == 'group':
+                for k in s.defines.get(g.name, []):
+                    if k.t == 'teleporter' and k.name: where.setdefault(k.name, []).append(eff[id(g)])
+
+        def full(name, inst=None):
+            """BZW name of a link target, seen from inside group instance `inst` (None = top level)."""
+            if inst and inst in where.get(name, []): return '%s:%s' % (inst, name)
+            if name in top: return name
+            w = where.get(name)
+            if w: return '%s:%s' % (w[0], name) if len(w) == 1 else '*:' + name
+            return name
+
+        def emit(src, o, inst):
+            for face, tgt, other in (('f', o.link, o.lface), ('b', o.blink, o.bface)):
+                if tgt: out.extend(['link', '  from %s:%s' % (src, face), '  to %s:%s' % (full(tgt, inst), other), 'end', ''])
         for o in s.objs:
-            if o.t == 'teleporter':
-                for face, tgt, other in (('f', o.link, 'b'), ('b', o.blink, 'f')):
-                    if tgt: out += ['link', '  from %s:%s' % (o.name, face), '  to %s:%s' % (tgt, other), 'end', '']
+            if o.t == 'teleporter': emit(o.name, o, None)
+            elif o.t == 'group':
+                for k in s.defines.get(o.name, []):
+                    if k.t == 'teleporter' and k.name: emit('%s:%s' % (eff[id(o)], k.name), k, eff[id(o)])
+        for f, t in s.world.get('rawlinks', []): out.extend(['link', '  from %s' % f, '  to %s' % t, 'end', ''])
         return '\n'.join(out)
 
 
@@ -1095,7 +1181,10 @@ class Editor(QWidget):
             if leaf.t == 'teleporter':
                 for tgt in (leaf.link, leaf.blink):
                     q = next((z for z, _ in expand(s.m) if z.t == 'teleporter' and tgt and z.name == tgt), None)
-                    if q: p.drawLine(QPointF(leaf.x, leaf.y), QPointF(q.x, q.y))
+                    if q is leaf or (q and q.x == leaf.x and q.y == leaf.y and q.name == leaf.name):
+                        p.save(); p.setBrush(Qt.BrushStyle.NoBrush)  # self-link: a ring round the teleporter
+                        rr = max(leaf.sy, 3 / S) + 5 / S; p.drawEllipse(QPointF(leaf.x, leaf.y), rr, rr); p.restore()
+                    elif q: p.drawLine(QPointF(leaf.x, leaf.y), QPointF(q.x, q.y))
         for leaf, src in expand(s.m):
             twin = src is not s.m.sel and s.m.sel and src.fam and src.fam == s.m.sel.fam
             s.draw_leaf(p, leaf, src is s.m.sel)
@@ -1936,7 +2025,7 @@ class WorldDialog(QDialog):
         m.world = {'name': s.name.text().strip(),
                    'flagheight': s.fh.value() if s.use_fh.isChecked() else None,
                    'nowalls': s.nowalls.isChecked(), 'freectf': s.freectf.isChecked(),
-                   'extra': list(m.world['extra'])}
+                   'extra': list(m.world['extra']), 'rawlinks': list(m.world.get('rawlinks', []))}
         m.W = s.size.value()
         m.changed.emit(); s.accept()
 
@@ -2117,6 +2206,14 @@ class Win(QMainWindow):
         s.gname = QComboBox(); s.gname.currentTextChanged.connect(lambda t: s.edit('name', t))
         s.link = QComboBox(); s.link.currentTextChanged.connect(lambda t: s.edit('link', '' if t == 'Nothing' else t))
         s.blink = QComboBox(); s.blink.currentTextChanged.connect(lambda t: s.edit('blink', '' if t == 'Nothing' else t))
+        s.lfacec, s.bfacec = QComboBox(), QComboBox()  # which face of the target you come out of
+        for cb in (s.lfacec, s.bfacec):
+            cb.addItems(['its back', 'its front']); cb.setToolTip('Which side of the target teleporter you emerge from')
+        s.lfacec.currentIndexChanged.connect(lambda i: s.edit('lface', 'b' if i == 0 else 'f'))
+        s.bfacec.currentIndexChanged.connect(lambda i: s.edit('bface', 'b' if i == 0 else 'f'))
+        s.link_row, s.blink_row = QWidget(), QWidget()
+        for row, cbs in ((s.link_row, (s.link, s.lfacec)), (s.blink_row, (s.blink, s.bfacec))):
+            h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.addWidget(cbs[0], 1); h.addWidget(cbs[1])
         s.div = QSpinBox(); s.div.setRange(3, 64); s.div.valueChanged.connect(lambda v: s.edit('divisions', v))
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
@@ -2159,7 +2256,7 @@ class Win(QMainWindow):
         fl.addRow('Team', s.team); fl.addRow('Group team override', s.gteam); fl.addRow('Group prefab', s.gname)
         s.member_combo = QComboBox(); s.member_combo.currentIndexChanged.connect(s.pick_member)
         fl.addRow('Edit member', s.member_combo)
-        fl.addRow('Front links to', s.link); fl.addRow('Back links to', s.blink)
+        fl.addRow('Front links to', s.link_row); fl.addRow('Back links to', s.blink_row)
         fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
         fl.addRow(s.flip); fl.addRow('Passability', s.phys); fl.addRow(s.ricochet)
         fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('', s.mirror_phys_btn)
@@ -2261,7 +2358,7 @@ class Win(QMainWindow):
         if s.busy or not o: return
         if not s.pushed: s.m.push(); s.pushed = True
         setattr(o, k, v)
-        if not s.editing_member and k not in ('link', 'blink', 'name'): s.m.sync_family(o)
+        if not s.editing_member and k not in ('link', 'blink', 'lface', 'bface', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
     def edit_face(s, k, v):
@@ -2318,7 +2415,7 @@ class Win(QMainWindow):
             widget = {'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'member_combo': s.member_combo,
-                      'link': s.link, 'blink': s.blink, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
+                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
                       'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
                       'wcolor': s.wcolor, 'tilt': s.tilt, 'initdelay': s.initdelay, 'wdelay': s.wdelay,
@@ -2341,8 +2438,9 @@ class Win(QMainWindow):
             s.gname.clear(); s.gname.addItems(sorted(s.m.defines)); s.gname.setCurrentText(o.name if o.t == 'group' else '')
             for cb, cur in ((s.link, o.link), (s.blink, o.blink)):
                 cb.clear(); cb.addItem('Nothing')
-                cb.addItems([q.name for q in s.m.objs if q.t == 'teleporter' and q is not o])
+                cb.addItems(s.m.tele_names())  # includes o itself (a teleporter may link to itself) and ones inside groups
                 cb.setCurrentText(cur or 'Nothing')
+            s.lfacec.setCurrentIndex(0 if o.lface == 'b' else 1); s.bfacec.setCurrentIndex(0 if o.bface == 'b' else 1)
             s.div.setValue(o.divisions); s.ang.setValue(o.angle if o.angle else 360); s.rat.setValue(o.ratio)
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
             for fk, cb in s.face.items():
@@ -2504,9 +2602,27 @@ class Win(QMainWindow):
         s.m.path = path; s.load_textures(os.path.dirname(path)); s.title(); s.add_recent(path)
 
 
+def load_app_icon():
+    """The BZMM logo: bzmapmaker.png beside this script, inside a PyInstaller bundle, or an installed theme icon."""
+    for base in (getattr(sys, '_MEIPASS', None), os.path.dirname(os.path.abspath(__file__)),
+                 '/usr/share/icons/hicolor/512x512/apps'):
+        p = base and os.path.join(base, 'bzmapmaker.png')
+        if p and os.path.exists(p): return QIcon(p)
+    ic = QIcon.fromTheme('bzmapmaker')
+    return None if ic.isNull() else ic
+
+
 if __name__ == '__main__':
     if '--version' in sys.argv[1:]:
         print('BZ Map Maker', __version__); sys.exit(0)
+    if sys.platform == 'win32':  # so the taskbar shows our icon rather than python's
+        try:
+            import ctypes; ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('org.bzflag.bzmapmaker')
+        except Exception: pass
     app = QApplication(sys.argv)
+    try: QApplication.setDesktopFileName('bzmapmaker')  # Wayland/Linux: ties the window to bzmapmaker.desktop's icon
+    except Exception: pass
+    _icon = load_app_icon()
+    if _icon: app.setWindowIcon(_icon)
     w = Win(sys.argv[1] if len(sys.argv) > 1 else None); w.show()
     sys.exit(app.exec())
