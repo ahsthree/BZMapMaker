@@ -1,23 +1,29 @@
-<p align="center">
-  <img src="assets/bzmapmaker-logo.png" alt="BZ Map Maker logo" width="180">
-</p>
-
 # BZ Map Maker
 
 A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by the classic BZEdit. It edits `.bzw` world files, lets you build and edit directly in a live 3D view, and can build symmetrical (balanced) capture-the-flag maps for you automatically.
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.4.4** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+**Current release: 1.4.8** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
-<img width="1920" height="1051" alt="image" src="https://github.com/user-attachments/assets/1f409e95-d424-43ab-9e68-90c8259c4338" />
+<p align="center">
+  <img src="assets/images/bzmapmaker-features.jpeg" alt="BZMapMaker Features Overview" width="700">
+</p>
 
+<p align="center">
+  <img src="assets/images/bzmm-display.png" alt="BZMapMaker Display" width="700">
+</p>
 
-<img width="1254" height="1254" alt="BZMM Arena Blueprint" src="https://github.com/user-attachments/assets/d27219f6-82ff-48df-8fba-e7eccabb5e88" />
+<p align="center">
+  <img src="assets/images/bzmm-advanced-display.png" alt="BZMapMaker Advanced Display" width="700">
+</p>
 
+## What's new in 1.4.8
 
-## What's new in 1.4.4
-
+- **Custom object library.** **Objects → Custom Objects** lists ready-made mesh objects (a crate, a lamp post, planters, a street corner...) by category; pick one and click in the 2D or 3D view to place it as a group. You can add your own with **Import into My Objects...** (from any `.bzw`) or **Save Selection to My Objects...** (from your current map), and the materials come along. See [Custom objects](#custom-objects).
+- **Remove Unused.** Placing a custom object adds its group definition (and materials) to the map, and deleting the placed copy leaves them behind. **Objects → Remove Unused...** lists the group definitions nothing places, plus the materials, texture matrices and physics drivers only they used, and deletes the ones you leave ticked. Saving can offer to do the same. See [Removing unused groups](#removing-unused-groups-and-materials).
+- **Texture matrices.** **Objects → Texture Matrices...** creates and edits `textureMatrix` blocks (shift, spin and scale, fixed or changing over time), and the Materials dialog has a **Texture matrix** field to give a material one. Existing texture matrices in a map are now read, editable and saved properly instead of just carried through.
+- **Groups can nest and scale.** A group can hold other groups, as in BZFlag itself (a `define` still can't hold another `define`), and a group now has **Scale X/Y/Z** in the panel. Transforms are written in the order BZFlag needs: scale, then rotation, then shift. Teleporters inside nested groups keep their links.
 - **Objects → World Settings...** edits the whole `world` block: name, size, flag height, **No walls** and **Free CTF spawns**. Any other world parameter in a file is kept as written. Previously only `size` survived an open-and-save.
 - **Box select in the 2D view:** **Shift+drag** a rectangle to select every object whose center is inside it (**Ctrl+Shift+drag** adds to the current selection), then press **Ctrl+G** to group them.
 - **Teleporters can link to themselves**, and each link now has an **exit face** setting ("its back" or "its front"). Exit faces from existing maps are kept instead of being rewritten to the default, and a self-link is drawn as a ring around the teleporter.
@@ -44,7 +50,8 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 - **Edit directly in 3D.** Click to select, drag to move, Shift+drag to rotate, drag to place and size new objects, all in the same 3D view you use to look at your map. Orbit with the right or middle mouse button (or Space+drag), and zoom with the scroll wheel.
 - **2D layout view**, either side by side with the 3D view or as a small fixed radar overlay in a corner of your choice.
-- **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, zones, world weapons, and prefab groups.
+- **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, zones, world weapons, and prefab groups (which can nest and be scaled).
+- **Custom object library:** a menu of ready-made mesh objects you place like a box, plus your own personal collection, kept in a folder on your computer.
 - **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte for byte, even though the editor itself can't reshape one.
 - **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
 - **Materials**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
@@ -62,15 +69,15 @@ Download the file for your system from the [Releases](../../releases) page.
 
 | System | File | How to install |
 | --- | --- | --- |
-| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.4.4_all.deb` | `sudo apt install ./bzmapmaker_1.4.4_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you. |
-| Windows | `BZMapMaker-1.4.4-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
-| macOS | `BZMapMaker-1.4.4-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
+| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.4.8_all.deb` | `sudo apt install ./bzmapmaker_1.4.8_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
+| Windows | `BZMapMaker-1.4.8-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
+| macOS | `BZMapMaker-1.4.8-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
 
 To upgrade the `.deb`, install the newer file the same way.
 
 ### Run from source
 
-You need **Python 3.9 or newer**, **PyQt6**, and **NumPy** (NumPy powers the 3D view's depth buffer. It's a very common, lightweight math library, not a graphics driver; nothing here needs a GPU or OpenGL). Then download `bzmapmaker.py` (or clone this repository) and run it. Keep `bzmapmaker.png` next to the script if you want the logo as the window icon.
+You need **Python 3.9 or newer**, **PyQt6**, and **NumPy** (NumPy powers the 3D view's depth buffer. It's a very common, lightweight math library, not a graphics driver; nothing here needs a GPU or OpenGL). Then download `bzmapmaker.py` (or clone this repository) and run it. Keep `bzmapmaker.png` next to the script if you want the logo as the window icon, and the `objects` folder next to it if you want the starter custom objects.
 
 ```
 python bzmapmaker.py                # start with a blank map
@@ -148,11 +155,11 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building the packages yourself
 
-The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.4.4`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
+The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.4.8`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
 
 | Package | Command (run on that OS) | Output |
 | --- | --- | --- |
-| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.4.4_all.deb` |
+| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.4.8_all.deb` |
 | Windows | `build_windows.bat` | `dist\BZMapMaker.exe` and a `.zip` |
 | macOS | `./build_macos.sh` | `dist/BZMapMaker.app` and a `.dmg` |
 
@@ -223,7 +230,7 @@ Each teleporter has a unique name and two link settings, **Front links to** and 
 - A teleporter can link to **itself**: pick its own name. Linking its front to its own back gives a pass-through, and in the 2D view a self-link is drawn as a ring around the teleporter.
 - Opening an older map that names a teleporter on its own line (`teleporter home`) or links by plain number (`from 0` / `to 1`) instead of by name still works. Those names and links are read correctly, and saving rewrites them in the modern, named style automatically.
 - Each face holds **one** link here. If a file gives a face several links (BZFlag then picks one at random), only the last is shown, but see below for links the editor keeps untouched.
-- **Teleporters inside groups** keep their links. BZFlag names them `<group instance>:<teleporter>`, so a group that holds teleporters is written with a `name` line, and links to and from them use those names. When the same group is used more than once, a link to one of its teleporters is written as `*:<teleporter>`, which BZFlag treats as a random pick among the copies.
+- **Teleporters inside groups** keep their links. BZFlag names them `<group instance>:<teleporter>` (groups inside groups chain the names, such as `town:padA:in`), so a group that holds teleporters is written with a `name` line, and links to and from them use those names. When the same group is used more than once, a link to one of its teleporters is written as `*:<teleporter>`, which BZFlag treats as a random pick among the copies.
 - Links the editor can't represent exactly, such as `from * to *` wildcards or links from one group instance to another, are kept word for word and written back at the end of the file.
 
 ### Arcs and cones
@@ -240,11 +247,48 @@ Arcs have a **Sweep angle** (360° is a full circle) and a **Hollow ratio** (0 i
 
 Select two or more objects (Ctrl+click each one, or Shift+drag a box in the 2D view), then **Edit → Group Selected** (Ctrl+G). This saves their layout as a reusable prefab (a `define` block, positioned relative to their combined center) and replaces them with a single **group** instance you can move and rotate as a whole.
 
-- To add more objects to an existing group, select the group together with the objects and press Ctrl+G again.
+- To add more objects to an existing group, select the group together with the objects and press Ctrl+G again. Nothing moves, even if the group is rotated or scaled.
+- **Groups nest.** Select two or more groups (or groups and other objects) and press Ctrl+G to wrap them in a new group. BZFlag allows a group to contain other groups, but a prefab can't contain itself, and the editor refuses to add a group to one of its own contents.
+- A group has **Scale X / Y / Z** in the panel. BZFlag applies a group's transforms in the order they are written, so the editor writes `scale`, then `rotation`, then `shift`. A non-uniform scale on a rotated object inside a group is approximated in the preview.
 - **Edit member** in the panel picks one object inside the selected group so you can change its size, position, links and so on.
 - A group can optionally override the team color of every base inside it. Set this in the panel's **Group team override** field.
 - Teleporters inside a group keep their links (see Teleporters above).
-- There is no ungroup command, and groups can't contain other groups.
+- There is no ungroup command. Prefabs are shared: if two group instances use the same prefab, changing what is inside one changes both.
+- The contents of a group inside another group are edited through a top-level instance of that group.
+
+### Custom objects
+
+**Objects → Custom Objects** is a library of ready-made objects built from meshes. Pick one from its category (or **Browse Library...** to search), then click in the 2D or 3D view to place it; the toolbar's last button shows which one is active. It is added as a **group**, so ten copies share one definition, and you can move, rotate and scale it like any group. Its materials are added to the map, and if the map already has a different material with the same name, the object's copy is renamed (`bzmm_crate_2`) so yours is never overwritten.
+
+**Adding your own**
+
+- **Save Selection to My Objects...** saves what is selected in the map (with its materials and any groups inside it) under a name and category you choose.
+- **Import into My Objects...** copies the meshes, boxes, groups and materials out of any `.bzw` file. If it holds several separate parts you can make one object from each.
+- **Open My Objects Folder** opens your personal folder, so you can also drop `.bzw` files in or share them with friends. The menu rebuilds each time you open it, so new files appear without restarting.
+- Teleporters, zones and weapons are left out, because they only make sense in one particular map.
+
+| System | Your objects folder | Built-in objects |
+| --- | --- | --- |
+| Linux | `~/.local/share/bzmapmaker/objects` | `/usr/share/bzmapmaker/objects` |
+| Windows | `%APPDATA%\BZMapMaker\objects` | bundled with the app |
+| macOS | `~/Library/Application Support/BZMapMaker/objects` | bundled with the app |
+
+A library object is an ordinary `.bzw` file, so you can make one in any tool. An optional first line gives it a menu entry, and without it the file name is the name and its folder is the category:
+
+```
+#bzmm-object name="Lamp post" category="Street" description="A 15 unit street lamp"
+```
+
+Groups inside `define` blocks are fine (`define street` can place `group lamppost` and `group planter`), but a `define` can't contain another `define`. Remember scale, rotation, shift order inside a group.
+
+### Removing unused groups and materials
+
+Every group instance in a map uses a prefab, a `define` block that is saved in the file even if nothing places it any more. This happens when you place a custom object, decide it doesn't work, and delete it: the definition and the materials it brought stay in the file as filler. Two ways to clear them out:
+
+- **Objects → Remove Unused...** shows a checklist of what nothing in the map uses: group definitions that nothing places (including ones only placed by other unused groups), and the materials, texture matrices and physics drivers that only those groups used. Untick anything you want to keep, then click **Remove Checked**. **Undo** (Ctrl+Z) brings it all back. Tick **Also list ... that nothing uses at all** to include things that were never used, such as a material you made but haven't assigned yet; those are left alone by default.
+- **When you save**, if the map has unused group definitions you are asked whether to remove them first: **Remove and Save**, **Save As Is**, or **Cancel**. Tick **Don't ask again** to stop the question; **Objects → Ask to Remove Unused When Saving** turns it back on.
+
+Anything a block this editor doesn't understand mentions by name is treated as in use, and removing a group definition never removes a material that something you are keeping still needs.
 
 ### Symmetry modes
 
@@ -291,7 +335,21 @@ http://images.bzflag.org/astevens/concrete.png
 - If the URL isn't under `http://images.bzflag.org/`, a warning appears. It still saves; the warning just tells you BZFlag clients may not download it by default.
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
-Every other material setting from an imported file (`addtexture`, `texmat`, `ambient`, and so on) is preserved exactly even though this editor doesn't expose controls for it.
+Every other material setting from an imported file (`addtexture`, `ambient`, and so on) is preserved exactly even though this editor doesn't expose controls for it. The **Texture matrix** field sets a material's `texmat`; see Texture matrices below.
+
+### Texture matrices
+
+**Objects → Texture Matrices...** manages the map's named `textureMatrix` blocks, which control how a material's texture moves. Pick one in the list or type a new name (no spaces), tick the settings you want, and click **Add / Update**. Only ticked settings are written, so a matrix that just scrolls doesn't also get unwanted zero lines.
+
+| Setting | What it does |
+| --- | --- |
+| Fixed shift, Fixed spin, Fixed scale | A time-invariant offset, rotation or scale: the texture doesn't move with time. |
+| Shift over time | The texture moves linearly; the values are the u and v frequencies. |
+| Spin over time | The texture spins around the center point; the value is the rotational frequency. |
+| Scale over time | The texture dynamically changes size; u and v frequencies, then u and v scales. |
+| Center | The central point that spin and scale work around. |
+
+To use one, open **Objects → Materials...**, pick the material (it needs a texture) and choose the matrix in its **Texture matrix** field. The matrices are written before the materials that use them. The 3D preview doesn't draw texture images, so you will see the movement in BZFlag itself. Custom objects whose materials use a texture matrix bring it along when you save or place them.
 
 ### Physics drivers
 
@@ -305,7 +363,8 @@ Every other material setting from an imported file (`addtexture`, `texmat`, `amb
 
 Tabbed alongside the Selected Object panel (click the tab to switch to it). This shows the raw `.bzw` text of your current map, live.
 
-- **Refresh from Map** pulls in the latest state; it also updates on its own a moment after you make a change, but only while this tab is visible.
+- **Refresh from Map** pulls in the latest state; it also updates on its own a moment after you make a change, but only while this tab is visible. The cursor and scroll position are kept, and the automatic refresh leaves the box alone while it holds edits you haven't applied (the status line under the text says "edited, not applied yet"). The Refresh button asks before throwing those edits away.
+- **Find, replace and go to line**, like a text editor. **Ctrl+F** (or the **Find / Replace** button) opens a find bar: matches are highlighted and counted as you type, **Enter** or **F3** goes to the next match and **Shift+F3** to the previous, and the search wraps around. **Ctrl+H** jumps to the replace field; **Replace** changes the current match and moves on, and **Replace All** changes every match as a single undo step (Ctrl+Z inside the box). **Match case** and **Whole words** are tick boxes, and **Esc** closes the bar. **Ctrl+L** (or the **Go to Line** button) asks for a line number, and the status line always shows the cursor's line and column. Line numbers run down the left side of the box, with the current line in bold. These shortcuts only work while the cursor is in the Map Text box. Changes made with replace are edits to the text, so press **Apply to Map** to use them.
 - **Apply to Map** parses whatever's in the box and replaces the map with it, the same as opening a file, so undo still works normally afterward. This is how you hand-add an object by typing or pasting a block directly.
 - With **"Apply the toolbar's symmetry mode to new objects"** checked (on by default) and a symmetry mode active, any object that's genuinely new in the text you applied gets its symmetric copies built automatically, the same as if you'd placed it with the mouse. Editing an existing object's numbers, rather than adding a new block, is treated as a plain edit and won't trigger this, so refreshing, glancing at the text, and applying it again unchanged never duplicates anything.
 
@@ -319,13 +378,14 @@ Tabbed alongside the Selected Object panel (click the tab to switch to it). This
 
 ## Supported `.bzw` content
 
-Reads and writes `world`, `options`, `physics`, `material`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`, `mesh`, `zone`, `weapon`, `define`/`group`, and `link` blocks, plus per-face `matref` on boxes and arcs. Any block type this editor doesn't specifically handle (dynamic colors, texture matrices, water level, transforms...) is preserved exactly as written and saved back unchanged. It just isn't drawn or editable here.
+Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `box`, `pyramid`, `base`, `teleporter`, `arc`, `cone`, `mesh`, `zone`, `weapon`, `define`/`group`, and `link` blocks, plus per-face `matref` on boxes and arcs. Any block type this editor doesn't specifically handle (dynamic colors, water level, transforms...) is preserved exactly as written and saved back unchanged. It just isn't drawn or editable here.
 
 **Known limits:**
 
-- Meshes can be moved but not reshaped, rotated, or scaled here.
-- There is no ungroup command, and groups can't contain other groups.
+- Meshes can be moved but not reshaped here. Put a mesh in a group to rotate or scale it.
+- There is no ungroup command.
 - Each teleporter face holds one link in the editor (extra links in a file are kept as written, but not shown).
+- The custom object library has no picture previews yet, only names, categories and descriptions.
 - Comments in the file are lost on save.
 - The 3D preview shows flat material colors (real or approximated from a texture), not actual texture images.
 
@@ -341,6 +401,8 @@ The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlappin
 - Editing mesh geometry (not just moving it)
 - An ungroup command
 - Several links per teleporter face
+- Picture previews in the custom object library, and dropping a `.bzw` onto the window to import it
+- Regular-expression find in the Map Text
 - Saving symmetry pairs so they survive a save/reload outside of Map Text
 
 ## License
