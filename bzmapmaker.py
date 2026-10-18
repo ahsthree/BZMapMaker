@@ -8,16 +8,17 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, re, math, json, copy, types, hashlib, shlex
 
-__version__ = '1.4.4'
+__version__ = '1.4.8'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QSettings, QTimer, QUrl
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QRect, QSize, QSettings, QTimer, QUrl
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
-                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon, QDesktopServices)
+                          QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon, QDesktopServices,
+                          QShortcut, QTextCursor, QTextDocument, QTextCharFormat)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
-                              QDialogButtonBox, QInputDialog, QPlainTextEdit, QCheckBox)
+                              QDialogButtonBox, QInputDialog, QPlainTextEdit, QCheckBox, QTextEdit, QListWidgetItem)
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -123,6 +124,53 @@ class PhysicsDriver:
     has_death: bool = False
     extra: list = field(default_factory=list)
     raw: list = field(default_factory=list)
+
+
+@dataclass
+class TexMatrix:
+    """A textureMatrix: how a material's texture shifts, spins or scales, fixed or over time. Every
+    setting is optional (None = not written), so a matrix that only shifts doesn't also emit
+    unwanted zero lines. Lines this editor doesn't know are kept in `extra`."""
+    name: str
+    fixedshift: tuple = None   # (u, v) time-invariant shift
+    fixedspin: float = None    # time-invariant rotation
+    fixedscale: tuple = None   # (u, v) time-invariant scale
+    shift: tuple = None        # (u frequency, v frequency)
+    spin: float = None         # rotation frequency
+    scale: tuple = None        # (u frequency, v frequency, u scale, v scale)
+    center: tuple = None       # (u, v) point that spin and scale turn around
+    extra: list = field(default_factory=list)
+    raw: list = field(default_factory=list)
+
+
+TEXMAT_FIELDS = (('scale', 4), ('spin', 1), ('shift', 2), ('center', 2),
+                 ('fixedscale', 2), ('fixedspin', 1), ('fixedshift', 2))  # written in the wiki's order
+
+
+def texmatrix_block(t):
+    if t.raw: return ['textureMatrix'] + ['  ' + b for b in t.raw] + ['end']  # untouched since import
+    ln = ['textureMatrix', '  name %s' % t.name]
+    for key, n in TEXMAT_FIELDS:
+        v = getattr(t, key)
+        if v is None: continue
+        v = (v,) if n == 1 and not isinstance(v, (tuple, list)) else v
+        ln.append('  %s %s' % (key, ' '.join(num(c) for c in v)))
+    return ln + ['  ' + e for e in t.extra] + ['end']
+
+
+def _texmat_names(mat):
+    """Texture matrices a material points at (its 'texmat <name>' lines)."""
+    return [q[1] for q in (ln.split() for ln in (mat.raw or mat.extra)) if len(q) > 1 and q[0].lower() == 'texmat']
+
+
+def _retarget_texmat(mat, mapping):
+    fix = lambda ln: ('texmat ' + mapping[ln.split()[1]]) if len(ln.split()) > 1 and ln.split()[0].lower() == 'texmat' and ln.split()[1] in mapping else ln
+    mat.extra = [fix(ln) for ln in mat.extra]; mat.raw = [fix(ln) for ln in mat.raw]
+
+
+def _tm_sig(t):
+    f = lambda v: tuple(v) if isinstance(v, (tuple, list)) else v
+    return tuple(f(getattr(t, k)) for k, _n in TEXMAT_FIELDS) + (tuple(t.extra),)
 
 
 def num(v):
@@ -276,7 +324,7 @@ def parse(text):
         lines.append(code); metas.append(pending); pending = None
     i = 0
     nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
-    world = new_world()
+    world = new_world(); texmats = {}
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
            'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
@@ -350,6 +398,22 @@ def parse(text):
                 else: extra.append(ln)
             name = name or (p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1))
             materials[name] = Material(name, tex, color, extra, list(body))
+        elif k == 'texturematrix':
+            body = read_raw_block(); tm = TexMatrix(''); counts = dict(TEXMAT_FIELDS)
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: tm.name = q[1]; continue
+                if kk in counts:
+                    try:
+                        v = tuple(float(a) for a in q[1:1 + counts[kk]])
+                        if len(v) == counts[kk]:
+                            setattr(tm, kk, v[0] if counts[kk] == 1 else v); continue
+                    except ValueError: pass
+                tm.extra.append(ln)  # anything unrecognised is written back as it was
+            tm.name = tm.name or (p[1] if len(p) > 1 else 'texmat%d' % (len(texmats) + 1)); tm.raw = list(body)
+            texmats[tm.name] = tm
         elif k == 'physics':
             body = read_raw_block()
             name, linear, angular, slide, death = '', (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, ''
@@ -571,7 +635,7 @@ def parse(text):
             if fface == 'f': o.link, o.lface = (tplain if tchain else tn), tface
             elif fface == 'b': o.blink, o.bface = (tplain if tchain else tn), tface
     world['rawlinks'] = raw
-    return nw, objs, materials, defines, extras, options_text, physics, world
+    return nw, objs, materials, defines, extras, options_text, physics, world, texmats
 
 
 def obj_block(o):
@@ -763,10 +827,10 @@ def load_library_content(path):
         key = (path, os.path.getmtime(path))
         if key not in _LIBCACHE:
             with open(path, encoding='utf-8', errors='replace') as fh: text = fh.read()
-            _nw, objs, materials, defines, _x, _o, _p, _w = parse(text)
+            _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(text)
             objs = [o for o in objs if o.t not in LIB_SKIP]
             defines = {n: [k for k in ks if k.t not in LIB_SKIP] for n, ks in defines.items()}
-            _LIBCACHE[key] = (objs, defines, materials)
+            _LIBCACHE[key] = (objs, defines, materials, texmats)
         return copy.deepcopy(_LIBCACHE[key])
     except OSError:
         return None
@@ -809,7 +873,27 @@ def _materials_used(objs, defines):
     return used
 
 
-def library_text(name, category, description, objs, defines, materials):
+def _uses_in(objs, defines):
+    """(materials, physics drivers) the objects use, following groups into the prefabs they place."""
+    mats, phys, seen = set(), set(), set()
+
+    def scan(lst, depth=0):
+        for o in lst:
+            if o.matref: mats.add(o.matref)
+            mats.update(v for v in o.mats.values() if v)
+            if o.phydrv: phys.add(o.phydrv)
+            if o.t == 'mesh':
+                for ln in MESHDATA.get(o.mesh, []):
+                    p = ln.split()
+                    if len(p) > 1 and p[0].lower() == 'matref': mats.add(p[1])
+                    elif len(p) > 1 and p[0].lower() == 'phydrv': phys.add(p[1])
+            if o.t == 'group' and o.name in defines and o.name not in seen and depth <= MAX_NEST:
+                seen.add(o.name); scan(defines[o.name], depth + 1)
+    scan(objs)
+    return mats, phys
+
+
+def library_text(name, category, description, objs, defines, materials, texmats=None):
     """The .bzw text of a library object: header, the materials it uses, the prefabs it needs, then the objects."""
     need, order = set(), []
 
@@ -823,6 +907,9 @@ def library_text(name, category, description, objs, defines, materials):
         if o.t == 'group': visit(o.name)
     used = _materials_used(objs, defines)
     out = [lib_header(name, category, description), '# Made with BZ Map Maker', '']
+    wanted = {t for mn in used if mn in materials for t in _texmat_names(materials[mn])}
+    for tn in sorted(wanted):  # a material's texture matrix has to be defined before it
+        if tn in (texmats or {}): out += texmatrix_block(texmats[tn]) + ['']
     for mn in sorted(used):
         if mn in materials: out += material_block(materials[mn]) + ['']
     for dn in order:
@@ -858,7 +945,7 @@ def library_path_for(name, directory=None):
     return path, False
 
 
-def save_library_object(name, category, description, objs, defines, materials, directory=None):
+def save_library_object(name, category, description, objs, defines, materials, texmats=None, directory=None):
     """Write objs (centred on the origin, map-only objects left out) into the person's library. Returns the path, or None."""
     objs = copy.deepcopy([o for o in objs if o.t not in LIB_SKIP])
     if not objs: return None
@@ -868,7 +955,7 @@ def save_library_object(name, category, description, objs, defines, materials, d
     directory = directory or user_library_dir()
     os.makedirs(directory, exist_ok=True)
     path, _ = library_path_for(name, directory)
-    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials))
+    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials, texmats or {}))
     _LIBCACHE.clear()
     return path
 
@@ -877,14 +964,14 @@ def import_into_library(src, name, category, description, split=False, directory
     """Copy the objects (and the materials and prefabs they need) from another .bzw into the library.
     Returns the list of files written; [] if the file held nothing a library object can be made of."""
     with open(src, encoding='utf-8', errors='replace') as fh: text = fh.read()
-    _nw, objs, materials, defines, _x, _o, _p, _w = parse(text)
+    _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(text)
     objs = [o for o in objs if o.t not in LIB_SKIP]
     if not objs: return []
     groups = [[o] for o in objs] if (split and len(objs) > 1) else [objs]
     out = []
     for i, grp in enumerate(groups, 1):
         label = name if len(groups) == 1 else '%s %d' % (name, i)
-        p = save_library_object(label, category, description, grp, defines, materials, directory)
+        p = save_library_object(label, category, description, grp, defines, materials, texmats, directory)
         if p: out.append(p)
     return out
 
@@ -898,6 +985,7 @@ class Model(QObject):
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.options_text = ''
         s.physics = {}
+        s.texmats = {}  # Objects -> Texture Matrices
         s.world = new_world()  # Objects -> World Settings
         s.lib_item = None  # the custom object the 'Custom object' tool places
         s.nid, s.sym = 1, 0
@@ -909,7 +997,7 @@ class Model(QObject):
              'materials': {k: asdict(v) for k, v in s.materials.items()},
              'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras,
              'options_text': s.options_text, 'physics': {k: asdict(v) for k, v in s.physics.items()},
-             'world': s.world}
+             'texmats': {k: asdict(v) for k, v in s.texmats.items()}, 'world': s.world}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -921,9 +1009,63 @@ class Model(QObject):
         s.extras = d.get('extras', [])
         s.options_text = d.get('options_text', '')
         s.physics = {k: PhysicsDriver(**v) for k, v in d.get('physics', {}).items()}
+        s.texmats = {k: TexMatrix(**v) for k, v in d.get('texmats', {}).items()}
         s.world = d.get('world') or new_world()
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
+
+    def reachable_defines(s):
+        """Names of the prefabs that something in the map actually places (directly or through another prefab)."""
+        out = set()
+
+        def visit(name, depth=0):
+            if name in out or name not in s.defines or depth > MAX_NEST: return
+            out.add(name)
+            for k in s.defines[name]:
+                if k.t == 'group': visit(k.name, depth + 1)
+        for o in s.objs:
+            if o.t == 'group': visit(o.name)
+        return out
+
+    def cleanup_plan(s, everything=False):
+        """What 'remove unused' would delete, as {'defines', 'materials', 'texmats', 'physics'} name lists.
+        Always: group prefabs nothing places, plus the materials, texture matrices and physics drivers
+        that only those prefabs used. With everything=True also anything else nothing uses at all (say, a
+        material you made but haven't assigned yet). Anything an unrecognised block mentions by name is kept."""
+        reach = s.reachable_defines(); dead = [n for n in s.defines if n not in reach]
+        live_m, live_p = _uses_in(s.objs, s.defines); dead_m, dead_p = set(), set()
+        for n in dead:
+            m, p = _uses_in(s.defines[n], s.defines); dead_m |= m; dead_p |= p
+        blob = '\n'.join(s.extras)
+        named = lambda name: re.search(r'(?<![\w.-])%s(?![\w.-])' % re.escape(name), blob) is not None
+        pick = lambda have, live, dead_used: [n for n in have if n not in live and not named(n) and (everything or n in dead_used)]
+        mats, phys = pick(s.materials, live_m, dead_m), pick(s.physics, live_p, dead_p)
+        kept = [m for n, m in s.materials.items() if n not in mats]
+        ref_kept = {t for m in kept for t in _texmat_names(m)}; ref_all = {t for m in s.materials.values() for t in _texmat_names(m)}
+        texmats = [n for n in s.texmats if n not in ref_kept and not named(n) and (everything or n in ref_all)]
+        return {'defines': dead, 'materials': mats, 'texmats': texmats, 'physics': phys}
+
+    def apply_cleanup(s, plan):
+        """Delete what the plan lists (undoable). Anything still used by something that is being kept is left
+        alone, so unticking a prefab in the dialog can't strand the materials it needs. Returns what was removed."""
+        gone = {k: [] for k in ('defines', 'materials', 'texmats', 'physics')}
+        want = {k: set(plan.get(k, ())) for k in gone}
+        if not any(want.values()): return gone
+        s.push()
+        for n in want['defines']:
+            if n in s.defines: del s.defines[n]; gone['defines'].append(n)
+        live_m, live_p = _uses_in(s.objs, s.defines)
+        for kids in s.defines.values():  # prefabs that stay, even unplaced ones, still need their things
+            m, p = _uses_in(kids, s.defines); live_m |= m; live_p |= p
+        for n in want['materials']:
+            if n in s.materials and n not in live_m: del s.materials[n]; gone['materials'].append(n)
+        for n in want['physics']:
+            if n in s.physics and n not in live_p: del s.physics[n]; gone['physics'].append(n)
+        ref = {t for m in s.materials.values() for t in _texmat_names(m)}
+        for n in want['texmats']:
+            if n in s.texmats and n not in ref: del s.texmats[n]; gone['texmats'].append(n)
+        s.changed.emit()
+        return gone
 
     def tele_names(s):
         """Every teleporter name in the map: top-level ones and ones inside group prefabs."""
@@ -997,8 +1139,18 @@ class Model(QObject):
         once, so placing it again shares them. Returns the group, or None."""
         got = load_library_content(item.path)
         if not got or not got[0]: return None
-        objs, defines, materials = got
-        slug = lib_slug(item.name); rename = {}
+        objs, defines, materials, texmats = got
+        slug = lib_slug(item.name); rename = {}; tmap = {}
+        for name, tm in texmats.items():
+            have = s.texmats.get(name)
+            if have is None: s.texmats[name] = tm; continue
+            if _tm_sig(have) == _tm_sig(tm): continue  # the map already has this one
+            n, i = name, 1
+            while n in s.texmats or n in texmats: i += 1; n = '%s_%d' % (name, i)
+            tm.name = n; tm.raw = [('name ' + n) if ln.split()[:1] == ['name'] else ln for ln in tm.raw]
+            s.texmats[n] = tm; tmap[name] = n
+        if tmap:
+            for mat in materials.values(): _retarget_texmat(mat, tmap)
         for name, mat in materials.items():
             have = s.materials.get(name)
             if have is None: s.materials[name] = mat; continue
@@ -1280,9 +1432,9 @@ class Model(QObject):
         return g.name
 
     def load(s, text, folder=None):
-        nw, objs, materials, defines, extras, options_text, physics, world = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics, world, texmats = parse(text)
         s.push(); s.W = nw or s.W; s.world = world; s.objs = objs; s.materials = materials; s.defines = defines
-        s.extras = extras; s.options_text = options_text; s.physics = physics
+        s.extras = extras; s.options_text = options_text; s.physics = physics; s.texmats = texmats
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
         s.texcache = {}
@@ -1293,6 +1445,7 @@ class Model(QObject):
         if s.options_text.strip():
             out += ['options'] + ['  ' + ln for ln in s.options_text.splitlines() if ln.strip()] + ['end', '']
         for pd in s.physics.values(): out += physics_block(pd) + ['']
+        for tm in s.texmats.values(): out += texmatrix_block(tm) + ['']  # before the materials that use them
         for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
         for name in s.ordered_defines():
@@ -2286,6 +2439,190 @@ class OptionsDialog(QDialog):
         s.m.push(); s.m.options_text = s.text.toPlainText(); s.m.changed.emit(); s.accept()
 
 
+class LineGutter(QWidget):
+    """The strip of line numbers beside a CodeEdit. It only asks the editor to paint it."""
+
+    def __init__(s, ed):
+        super().__init__(ed); s.ed = ed
+
+    def sizeHint(s):
+        return QSize(s.ed.gutter_width(), 0)
+
+    def paintEvent(s, e):
+        s.ed.paint_gutter(e)
+
+
+class CodeEdit(QPlainTextEdit):
+    """A plain text box with line numbers down the left side (the current line's number is bold)."""
+
+    def __init__(s):
+        super().__init__()
+        s.gutter = LineGutter(s)
+        s.blockCountChanged.connect(s.update_gutter_width)
+        s.updateRequest.connect(s.update_gutter)
+        s.cursorPositionChanged.connect(lambda: s.gutter.update())
+        s.update_gutter_width()
+
+    def gutter_width(s):
+        return 14 + s.fontMetrics().horizontalAdvance('9') * max(2, len(str(max(s.blockCount(), 1))))
+
+    def update_gutter_width(s, _count=0):
+        s.setViewportMargins(s.gutter_width(), 0, 0, 0)
+
+    def update_gutter(s, rect, dy):
+        if dy: s.gutter.scroll(0, dy)
+        else: s.gutter.update(0, rect.y(), s.gutter.width(), rect.height())
+        if rect.contains(s.viewport().rect()): s.update_gutter_width()
+
+    def resizeEvent(s, e):
+        super().resizeEvent(e)
+        cr = s.contentsRect(); s.gutter.setGeometry(QRect(cr.left(), cr.top(), s.gutter_width(), cr.height()))
+
+    def paint_gutter(s, event):
+        pal = s.palette(); p = QPainter(s.gutter)
+        p.fillRect(event.rect(), pal.window().color())
+        cur = s.textCursor().blockNumber(); fh = s.fontMetrics().height()
+        block = s.firstVisibleBlock(); n = block.blockNumber()
+        top = round(s.blockBoundingGeometry(block).translated(s.contentOffset()).top())
+        bottom = top + round(s.blockBoundingRect(block).height())
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                f = p.font(); f.setBold(n == cur); p.setFont(f)
+                p.setPen(pal.text().color() if n == cur else pal.mid().color())
+                p.drawText(0, top, s.gutter.width() - 6, fh, Qt.AlignmentFlag.AlignRight, str(n + 1))
+            block = block.next(); top = bottom; bottom = top + round(s.blockBoundingRect(block).height()); n += 1
+        p.end()
+
+
+def replace_all_text(doc, find, repl, flags, limit=200000):
+    """Replace every match in a QTextDocument as a single undo step. Returns how many were replaced.
+    Scanning resumes after each inserted text, so a replacement that contains the search text can't loop."""
+    edit = QTextCursor(doc); edit.beginEditBlock(); n = 0; pos = 0
+    try:
+        while n < limit:
+            c = doc.find(find, pos, flags)
+            if c.isNull(): break
+            c.insertText(repl); n += 1; pos = c.position()
+    finally:
+        edit.endEditBlock()
+    return n
+
+
+class CleanupDialog(QDialog):
+    """Objects > Remove Unused: choose which leftovers to delete from the map."""
+    KINDS = (('defines', 'Group definition'), ('materials', 'Material'), ('texmats', 'Texture matrix'), ('physics', 'Physics driver'))
+
+    def __init__(s, m):
+        super().__init__(); s.m = m
+        s.setWindowTitle('Remove Unused'); s.resize(480, 420)
+        lay = QVBoxLayout(s)
+        s.intro = QLabel('Everything listed is saved into the map file but not used by anything in it. Untick anything you want to keep. '
+                         'Undo (Ctrl+Z) brings it back.'); s.intro.setWordWrap(True); lay.addWidget(s.intro)
+        s.list = QListWidget(); lay.addWidget(s.list, 1)
+        s.empty = QLabel('Nothing to remove.'); lay.addWidget(s.empty)
+        s.more = QCheckBox('Also list materials, texture matrices and physics drivers that nothing uses at all')
+        s.more.toggled.connect(lambda _v: s.fill()); lay.addWidget(s.more)
+        s.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        s.bb.button(QDialogButtonBox.StandardButton.Ok).setText('Remove Checked')
+        s.bb.accepted.connect(s.accept); s.bb.rejected.connect(s.reject); lay.addWidget(s.bb)
+        s.fill()
+
+    def fill(s):
+        plan = s.m.cleanup_plan(s.more.isChecked()); s.list.clear()
+        for key, label in s.KINDS:
+            for name in plan[key]:
+                it = QListWidgetItem('%s:  %s' % (label, name)); it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked); it.setData(Qt.ItemDataRole.UserRole, (key, name)); s.list.addItem(it)
+        s.empty.setVisible(s.list.count() == 0)
+
+    def chosen(s):
+        out = {k: [] for k, _l in s.KINDS}
+        for i in range(s.list.count()):
+            it = s.list.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                key, name = it.data(Qt.ItemDataRole.UserRole); out[key].append(name)
+        return out
+
+
+class TexMatrixDialog(QDialog):
+    """Objects > Texture Matrices: named matrices that make a material's texture shift, spin or
+    scale (fixed, or moving over time). A material uses one through its 'Texture matrix' field.
+    Only the settings ticked here are written to the file."""
+    # key, checkbox text, value prefixes, tooltip (from the BZFlag wiki's description of each parameter)
+    ROWS = (('fixedshift', 'Fixed shift', ('u ', 'v '), 'Time-invariant shift: the texture doesn\'t move with time.'),
+            ('fixedspin', 'Fixed spin', ('',), 'Time-invariant rotation: the texture doesn\'t move with time.'),
+            ('fixedscale', 'Fixed scale', ('u ', 'v '), 'Time-invariant scale: the texture doesn\'t move with time.'),
+            ('shift', 'Shift over time', ('u freq ', 'v freq '), 'The texture moves linearly: u and v frequencies.'),
+            ('spin', 'Spin over time', ('freq ',), 'The texture spins around the center point: the rotational frequency.'),
+            ('scale', 'Scale over time', ('u freq ', 'v freq ', 'u scale ', 'v scale '),
+             'The texture dynamically changes size: u and v frequencies, then u and v scales.'),
+            ('center', 'Center for spin and scale', ('u ', 'v '), 'The central point that spin and scale work around.'))
+
+    def __init__(s, m):
+        super().__init__(); s.m, s.cur, s.cb, s.sp = m, None, {}, {}
+        s.setWindowTitle('Texture Matrices'); s.resize(620, 480)
+        root = QHBoxLayout(s)
+        s.list = QListWidget(); s.list.addItems(sorted(m.texmats)); s.list.currentTextChanged.connect(s.pick)
+        root.addWidget(s.list, 1)
+        col = QVBoxLayout(); root.addLayout(col, 3)
+        s.name = QLineEdit(); form = QFormLayout(); form.addRow('Name', s.name)
+        for key, label, prefixes, tip in s.ROWS:
+            cb = QCheckBox(label); cb.setToolTip(tip); row = QHBoxLayout(); spins = []
+            for pre in prefixes:
+                sp = QDoubleSpinBox(); sp.setRange(-1000, 1000); sp.setDecimals(3); sp.setSingleStep(.1)
+                sp.setPrefix(pre); sp.setEnabled(False); sp.setToolTip(tip); row.addWidget(sp); spins.append(sp)
+            cb.toggled.connect(lambda v, sps=spins: [x.setEnabled(v) for x in sps])
+            s.cb[key], s.sp[key] = cb, spins; form.addRow(cb, row)
+        col.addLayout(form)
+        btns = QHBoxLayout()
+        add = QPushButton('Add / Update'); add.clicked.connect(s.save)
+        rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
+        btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
+        note = QLabel('Give a material one with its "Texture matrix" field in Objects > Materials (the material also needs a '
+                      'texture). The 3D preview doesn\'t draw textures, so you\'ll see the effect in BZFlag itself.')
+        note.setWordWrap(True); col.addWidget(note); col.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
+        col.addWidget(bb)
+
+    def pick(s, name):
+        s.cur = s.m.texmats.get(name)
+        if not s.cur: return
+        s.name.setText(s.cur.name)
+        for key, _n in TEXMAT_FIELDS:
+            v = getattr(s.cur, key); s.cb[key].setChecked(v is not None)
+            vals = v if isinstance(v, (tuple, list)) else ((v,) if v is not None else ())
+            for sp, x in zip(s.sp[key], vals): sp.setValue(x)
+            if v is None:
+                for sp in s.sp[key]: sp.setValue(0)
+
+    def values(s):
+        out = {}
+        for key, n in TEXMAT_FIELDS:
+            if not s.cb[key].isChecked(): out[key] = None; continue
+            v = tuple(sp.value() for sp in s.sp[key]); out[key] = v[0] if n == 1 else v
+        return out
+
+    def save(s):
+        name = s.name.text().strip()
+        if not name or any(c.isspace() for c in name):
+            QMessageBox.information(s, 'Texture matrix', 'Give it a name with no spaces, such as scroll_left.'); return
+        old = s.m.texmats.get(name); s.m.push()
+        s.m.texmats[name] = TexMatrix(name, extra=list(old.extra) if old else [], **s.values())  # keep lines we don't edit
+        if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
+        s.m.changed.emit()
+
+    def remove(s):
+        name = s.name.text().strip()
+        if name not in s.m.texmats: return
+        users = [m.name for m in s.m.materials.values() if name in _texmat_names(m)]
+        if users and QMessageBox.question(s, 'Remove texture matrix', '%s use%s "%s". Remove it anyway? (They keep pointing at it, '
+                'and BZFlag will complain until you change them.)' % (', '.join(users), 's' if len(users) == 1 else '', name)) \
+                != QMessageBox.StandardButton.Yes: return
+        s.m.push(); del s.m.texmats[name]
+        for it in s.list.findItems(name, Qt.MatchFlag.MatchExactly): s.list.takeItem(s.list.row(it))
+        s.m.changed.emit()
+
+
 class MaterialsDialog(QDialog):
     APPROVED = 'http://images.bzflag.org/'
 
@@ -2306,7 +2643,10 @@ class MaterialsDialog(QDialog):
         for sp in (s.r, s.g, s.b, s.al): sp.setRange(0, 1); sp.setSingleStep(.05); sp.setValue(1); rgb.addWidget(sp)
         form = QFormLayout(); form.addRow('Name', s.name)
         trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse); trow.addWidget(fetch)
-        form.addRow('Texture', trow); form.addRow('Color R G B A', rgb)
+        form.addRow('Texture', trow)
+        s.texmat = QComboBox(); s.fill_texmat('')
+        s.texmat.setToolTip('How the texture moves, spins or scales; define them in Objects > Texture Matrices')
+        form.addRow('Texture matrix', s.texmat); form.addRow('Color R G B A', rgb)
         col.addLayout(form)
         s.texwarn = QLabel(); s.texwarn.setWordWrap(True); s.texwarn.setStyleSheet('color:#b5651d')
         col.addWidget(s.texwarn)
@@ -2317,7 +2657,7 @@ class MaterialsDialog(QDialog):
         note = QLabel('Material colors show in the 3D preview -- actual texture images are not drawn, so '
                        'Load PNG fills in the color automatically from the image (if you haven\'t set one '
                        'yourself), and Fetch Color from URL does the same for an internet texture.\n'
-                       'Every other material setting (addtexture, texmat, ambient...) is kept in the file '
+                       'Every other material setting (addtexture, ambient...) is kept in the file '
                        'but not drawn.\nFor a texture on the internet, paste its full URL (e.g. ' + s.APPROVED +
                        'someone/name.png). The game only loads http://, so a pasted https:// link is switched '
                        'to http:// automatically.')
@@ -2330,7 +2670,13 @@ class MaterialsDialog(QDialog):
         s.cur = s.m.materials.get(name)
         if s.cur:
             s.name.setText(s.cur.name); s.tex.setText(s.cur.texture)
+            s.fill_texmat((_texmat_names(s.cur) or [''])[0])
             for sp, v in zip((s.r, s.g, s.b, s.al), s.cur.color): sp.setValue(v)
+
+    def fill_texmat(s, current):
+        """The combo lists the map's texture matrices; one the material names but the map lacks is kept so it isn't lost."""
+        names = sorted(set(s.m.texmats) | ({current} if current else set()))
+        s.texmat.clear(); s.texmat.addItems(['(none)'] + names); s.texmat.setCurrentText(current or '(none)')
 
     def check_tex(s, text):
         """The game only fetches http://, never https://, so silently drop the 's'. Then warn --
@@ -2382,8 +2728,9 @@ class MaterialsDialog(QDialog):
         name = s.name.text().strip()
         if not name: return
         old = s.m.materials.get(name)
-        mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()),
-                       list(old.extra) if old else [])  # keep addtexture/texmat/etc. when you edit
+        extra = [ln for ln in (old.extra if old else []) if ln.split()[:1] and ln.split()[0].lower() != 'texmat']  # keep addtexture etc.
+        if s.texmat.currentText() != '(none)': extra.append('texmat ' + s.texmat.currentText())
+        mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()), extra)
         s.m.materials[name] = mat
         if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
         s.m.changed.emit()
@@ -2596,11 +2943,16 @@ class Win(QMainWindow):
         s.act(e, 'Group Selected (Ctrl+click or Shift+drag box to select)', s.do_group, 'Ctrl+G')
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
+        s.act(ob, 'Texture Matrices...', s.open_texmats)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
         s.lib_menu = ob.addMenu('Custom Objects'); s.lib_menu.aboutToShow.connect(s.fill_library_menu)
         s.act(ob, 'World Settings...', s.open_world)
         s.act(ob, 'Map Options...', s.open_options)
         s.act(ob, 'Physics Drivers...', s.open_physics)
+        ob.addSeparator(); s.act(ob, 'Remove Unused...', s.open_cleanup)
+        s.cleanup_ask_action = QAction('Ask to Remove Unused When Saving', s); s.cleanup_ask_action.setCheckable(True)
+        s.cleanup_ask_action.setChecked(s.settings.value('cleanupAtSave', 'ask') != 'never')
+        s.cleanup_ask_action.toggled.connect(lambda on: s.settings.setValue('cleanupAtSave', 'ask' if on else 'never')); ob.addAction(s.cleanup_ask_action)
         vw = s.menuBar().addMenu('&View')
         lg = QActionGroup(s); cur_mode = s.settings.value('layoutMode', 'split')
         split_a = QAction('Side by Side', s); split_a.setCheckable(True); split_a.setChecked(cur_mode != 'radar')
@@ -2719,11 +3071,40 @@ class Win(QMainWindow):
         """A raw-text view of the map, for hand-editing or just reading what you built.
         Tabbed with the Selected Object panel rather than making the sidebar bigger."""
         tw = QWidget(); tl = QVBoxLayout(tw)
-        s.maptext = QPlainTextEdit(); s.maptext.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        s.maptext = CodeEdit(); s.maptext.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         s.maptext.setStyleSheet('font-family: monospace;')
+        tools = QHBoxLayout()
+        find_btn = QPushButton('Find / Replace  (Ctrl+F)'); find_btn.clicked.connect(lambda: s.show_find(False))
+        goto_btn = QPushButton('Go to Line  (Ctrl+L)'); goto_btn.clicked.connect(s.goto_line)
+        tools.addWidget(find_btn); tools.addWidget(goto_btn); tools.addStretch(1); tl.addLayout(tools)
         tl.addWidget(s.maptext)
+        # find / replace bar, hidden until asked for
+        s.find_bar = QWidget(); fb = QVBoxLayout(s.find_bar); fb.setContentsMargins(0, 0, 0, 0)
+        r1 = QHBoxLayout(); s.find_edit = QLineEdit(); s.find_edit.setPlaceholderText('Find')
+        prev_b = QPushButton('Prev'); next_b = QPushButton('Next'); close_b = QPushButton('Close')
+        prev_b.clicked.connect(lambda: s.find_next(True)); next_b.clicked.connect(lambda: s.find_next(False)); close_b.clicked.connect(s.hide_find)
+        for w_ in (s.find_edit, prev_b, next_b, close_b): r1.addWidget(w_)
+        r2 = QHBoxLayout(); s.repl_edit = QLineEdit(); s.repl_edit.setPlaceholderText('Replace with')
+        rep_b = QPushButton('Replace'); all_b = QPushButton('Replace All')
+        rep_b.clicked.connect(s.replace_one); all_b.clicked.connect(s.replace_all)
+        for w_ in (s.repl_edit, rep_b, all_b): r2.addWidget(w_)
+        r3 = QHBoxLayout(); s.case_chk = QCheckBox('Match case'); s.word_chk = QCheckBox('Whole words'); s.find_info = QLabel('')
+        for w_ in (s.case_chk, s.word_chk): r3.addWidget(w_)
+        r3.addStretch(1); r3.addWidget(s.find_info)
+        for r_ in (r1, r2, r3): fb.addLayout(r_)
+        s.find_edit.textChanged.connect(s.find_incremental); s.find_edit.returnPressed.connect(lambda: s.find_next(False))
+        s.repl_edit.returnPressed.connect(s.replace_one)
+        s.case_chk.toggled.connect(lambda _v: s.update_find_marks()); s.word_chk.toggled.connect(lambda _v: s.update_find_marks())
+        s.find_bar.hide(); tl.addWidget(s.find_bar)
+        s.mt_status = QLabel(); tl.addWidget(s.mt_status)
+        s.maptext.cursorPositionChanged.connect(s.update_mt_status)
+        s.maptext.document().modificationChanged.connect(lambda _m: s.update_mt_status())
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut  # only while the cursor is in this panel
+        for key, fn in (('Ctrl+F', lambda: s.show_find(False)), ('Ctrl+H', lambda: s.show_find(True)), ('F3', lambda: s.find_next(False)),
+                        ('Shift+F3', lambda: s.find_next(True)), ('Ctrl+L', s.goto_line), ('Esc', s.hide_find)):
+            sc = QShortcut(QKeySequence(key), tw); sc.setContext(ctx); sc.activated.connect(fn)
         row = QHBoxLayout()
-        refresh = QPushButton('Refresh from Map'); refresh.clicked.connect(s.refresh_maptext)
+        refresh = QPushButton('Refresh from Map'); refresh.clicked.connect(lambda: s.refresh_maptext(force=True))
         apply_btn = QPushButton('Apply to Map'); apply_btn.clicked.connect(s.apply_maptext)
         row.addWidget(refresh); row.addWidget(apply_btn); tl.addLayout(row)
         s.sym_chk = QCheckBox('Apply the toolbar\'s symmetry mode to new objects'); s.sym_chk.setChecked(True)
@@ -2740,8 +3121,9 @@ class Win(QMainWindow):
         s.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, s.textdock)
         s.tabifyDockWidget(s.dock, s.textdock); s.dock.raise_()
         s._text_pending = False
-        s.textdock.visibilityChanged.connect(lambda vis: s.refresh_maptext() if vis else None)
+        s.textdock.visibilityChanged.connect(lambda vis: s.refresh_maptext(force=False) if vis else None)
         s.m.changed.connect(s.schedule_maptext_refresh)
+        s.update_mt_status()
 
     def schedule_maptext_refresh(s):
         if not s.textdock.isVisible() or s._text_pending: return
@@ -2750,10 +3132,100 @@ class Win(QMainWindow):
 
     def _do_maptext_refresh(s):
         s._text_pending = False
-        if s.textdock.isVisible(): s.refresh_maptext()
+        if s.textdock.isVisible(): s.refresh_maptext(force=False)
 
-    def refresh_maptext(s):
-        s.maptext.setPlainText(s.m.text())
+    def refresh_maptext(s, force=True):
+        """Show the map's current text. The automatic refreshes (force=False) leave the box alone while it
+        holds edits you haven't applied; the Refresh button (force=True) asks before throwing them away.
+        The cursor and scroll position are kept so a refresh doesn't send you back to the top."""
+        ed = s.maptext
+        if ed.document().isModified():
+            if not force: return
+            if QMessageBox.question(s, 'Refresh from Map', 'The text has changes you have not applied. Discard them and reload from the map?') \
+                    != QMessageBox.StandardButton.Yes: return
+        cur = ed.textCursor(); line, col = cur.blockNumber(), cur.positionInBlock()
+        vs, hs = ed.verticalScrollBar().value(), ed.horizontalScrollBar().value()
+        ed.setPlainText(s.m.text())
+        blk = ed.document().findBlockByNumber(min(line, ed.document().blockCount() - 1))
+        c = QTextCursor(blk); c.setPosition(blk.position() + min(col, max(blk.length() - 1, 0))); ed.setTextCursor(c)
+        ed.verticalScrollBar().setValue(vs); ed.horizontalScrollBar().setValue(hs)
+        ed.document().setModified(False); s.update_find_marks()
+
+    # ---- find / replace / go to line in the map text ---------------------------------
+    def update_mt_status(s):
+        cur = s.maptext.textCursor(); doc = s.maptext.document()
+        t = 'Line %d of %d, column %d' % (cur.blockNumber() + 1, doc.blockCount(), cur.positionInBlock() + 1)
+        s.mt_status.setText(t + ('   |   edited, not applied yet' if doc.isModified() else ''))
+
+    def show_find(s, replace=False):
+        s.find_bar.show()
+        sel = s.maptext.textCursor().selectedText()
+        if sel and '\u2029' not in sel: s.find_edit.setText(sel)  # start from what is selected
+        if replace and s.find_edit.text(): s.repl_edit.setFocus()
+        else: s.find_edit.setFocus(); s.find_edit.selectAll()
+        s.update_find_marks()
+
+    def hide_find(s):
+        s.find_bar.hide(); s.maptext.setExtraSelections([]); s.maptext.setFocus()
+
+    def _find_flags(s, backward=False):
+        f = QTextDocument.FindFlag(0)
+        if s.case_chk.isChecked(): f |= QTextDocument.FindFlag.FindCaseSensitively
+        if s.word_chk.isChecked(): f |= QTextDocument.FindFlag.FindWholeWords
+        if backward: f |= QTextDocument.FindFlag.FindBackward
+        return f
+
+    def find_next(s, backward=False):
+        txt = s.find_edit.text(); ed = s.maptext
+        if not txt: return False
+        flags = s._find_flags(backward)
+        if ed.find(txt, flags): return True
+        keep = ed.textCursor(); c = ed.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End if backward else QTextCursor.MoveOperation.Start); ed.setTextCursor(c)
+        if ed.find(txt, flags):
+            s.statusBar().showMessage('Search wrapped around.', 2500); return True
+        ed.setTextCursor(keep); s.find_info.setText('No matches'); return False
+
+    def find_incremental(s, _text=None):
+        """Typing in the Find box jumps to the first match at or after where you were."""
+        c = s.maptext.textCursor()
+        if c.hasSelection(): c.setPosition(c.selectionStart()); s.maptext.setTextCursor(c)
+        s.find_next(False); s.update_find_marks()
+
+    def update_find_marks(s):
+        """Highlight every match and say how many there are."""
+        ed = s.maptext; txt = s.find_edit.text(); sels = []; n = 0; cap = 3000
+        if txt and s.find_bar.isVisible():
+            fmt = QTextCharFormat(); fmt.setBackground(QColor(255, 235, 59, 120))
+            doc, flags, pos = ed.document(), s._find_flags(), 0
+            while n < cap:
+                c = doc.find(txt, pos, flags)
+                if c.isNull(): break
+                sel = QTextEdit.ExtraSelection(); sel.cursor = c; sel.format = fmt; sels.append(sel); n += 1; pos = c.position()
+        ed.setExtraSelections(sels)
+        s.find_info.setText('' if not txt else 'No matches' if n == 0 else '%d%s match%s' % (n, '+' if n >= cap else '', '' if n == 1 else 'es'))
+
+    def replace_one(s):
+        txt = s.find_edit.text(); ed = s.maptext
+        if not txt: return
+        cur = ed.textCursor(); sel = cur.selectedText()
+        if cur.hasSelection() and (sel == txt if s.case_chk.isChecked() else sel.lower() == txt.lower()):
+            cur.insertText(s.repl_edit.text())
+        s.find_next(False); s.update_find_marks()
+
+    def replace_all(s):
+        txt = s.find_edit.text()
+        if not txt: return
+        n = replace_all_text(s.maptext.document(), txt, s.repl_edit.text(), s._find_flags())
+        s.update_find_marks()
+        s.statusBar().showMessage('Replaced %d match%s. Apply to Map to use the change.' % (n, '' if n == 1 else 'es') if n
+                                  else 'Nothing to replace.', 6000)
+
+    def goto_line(s):
+        doc = s.maptext.document(); n = max(doc.blockCount(), 1)
+        line, ok = QInputDialog.getInt(s, 'Go to Line', 'Line number (1 to %d):' % n, s.maptext.textCursor().blockNumber() + 1, 1, n)
+        if not ok: return
+        c = QTextCursor(doc.findBlockByNumber(line - 1)); s.maptext.setTextCursor(c); s.maptext.centerCursor(); s.maptext.setFocus()
 
     def _sig(s, o):
         # Identity by content, not by uid/fam (which text can't express), so this survives
@@ -2767,6 +3239,7 @@ class Win(QMainWindow):
             s.m.load(s.maptext.toPlainText())
         except Exception as e:
             QMessageBox.warning(s, 'Apply failed', str(e)); return
+        s.maptext.document().setModified(False)  # in sync with the map now, so refreshes may resume
         added = 0
         if s.sym_chk.isChecked() and s.m.sym:
             for o in list(s.m.objs):  # a plain list, so siblings appended below aren't re-processed
@@ -2941,6 +3414,51 @@ class Win(QMainWindow):
     def open_materials(s):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
+    def _removed_text(s, gone):
+        names = {'defines': 'group definition', 'materials': 'material', 'texmats': 'texture matrix', 'physics': 'physics driver'}
+        parts = ['%d %s%s' % (len(v), names[k], '' if len(v) == 1 else ('es' if k == 'texmats' else 's')) for k, v in gone.items() if v]
+        return ', '.join(parts)
+
+    def open_cleanup(s):
+        if not any(s.m.cleanup_plan(False).values()):
+            if not any(s.m.cleanup_plan(True).values()):
+                QMessageBox.information(s, 'Remove Unused', 'Nothing unused: every group definition, material, texture matrix and '
+                                        'physics driver in this map is in use.'); return
+        dlg = CleanupDialog(s.m)
+        if not dlg.exec(): return
+        gone = s.m.apply_cleanup(dlg.chosen())
+        s.statusBar().showMessage(('Removed ' + s._removed_text(gone) + '.') if any(gone.values()) else 'Nothing removed.', 8000)
+
+    def offer_cleanup(s):
+        """Called before a save: offer to drop unused group definitions (and what only they used).
+        Returns False if the person cancelled the save."""
+        if s.settings.value('cleanupAtSave', 'ask') == 'never': return True
+        plan = s.m.cleanup_plan(False)
+        if not plan['defines']: return True
+        n = len(plan['defines'])
+        box = QMessageBox(s); box.setIcon(QMessageBox.Icon.Question); box.setWindowTitle('Unused groups')
+        box.setText('This map has %d group definition%s that nothing places.' % (n, '' if n == 1 else 's'))
+        extra = [t for t in (len(plan['materials']) and '%d material%s' % (len(plan['materials']), '' if len(plan['materials']) == 1 else 's'),
+                             len(plan['texmats']) and '%d texture matri%s' % (len(plan['texmats']), 'x' if len(plan['texmats']) == 1 else 'ces'),
+                             len(plan['physics']) and '%d physics driver%s' % (len(plan['physics']), '' if len(plan['physics']) == 1 else 's')) if t]
+        box.setInformativeText('Remove %s%s before saving? They only take up space in the file, and Undo (Ctrl+Z) brings them back.'
+                               % ('it' if n == 1 else 'them', (' along with ' + ', '.join(extra) + ' only they used') if extra else ''))
+        box.setDetailedText('\n'.join(['Group definition: ' + x for x in plan['defines']] + ['Material: ' + x for x in plan['materials']] +
+                                       ['Texture matrix: ' + x for x in plan['texmats']] + ['Physics driver: ' + x for x in plan['physics']]))
+        rm = box.addButton('Remove and Save', QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('Save As Is', QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        never = QCheckBox("Don't ask again (turn it back on under Objects)"); box.setCheckBox(never)
+        box.exec(); clicked = box.clickedButton()
+        if clicked is cancel or clicked is None: return False
+        if never.isChecked(): s.cleanup_ask_action.setChecked(False)
+        if clicked is rm:
+            gone = s.m.apply_cleanup(plan); s.statusBar().showMessage('Removed ' + s._removed_text(gone) + '.', 8000)
+        return True
+
+    def open_texmats(s):
+        TexMatrixDialog(s.m).exec()
+
     def open_world(s):
         old = s.m.W
         if WorldDialog(s.m).exec() and s.m.W != old: s.ed.fit()
@@ -3020,7 +3538,7 @@ class Win(QMainWindow):
         if not dlg.exec(): return
         name, cat, desc, _split = dlg.values()
         if not s._confirm_replace(name): return
-        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials)
+        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials, s.m.texmats)
         except OSError as e:
             QMessageBox.warning(s, 'Save failed', str(e)); return
         msg = 'Saved "%s" to My Objects.' % name
@@ -3037,7 +3555,7 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Import failed', str(e)); return
-        nw, objs, materials, defines, extras, options_text, physics, _world = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics, _world, _texmats = parse(text)
         meshes = [o for o in objs if o.t == 'mesh']
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
@@ -3114,6 +3632,7 @@ class Win(QMainWindow):
         if as_new or not path:
             path = QFileDialog.getSaveFileName(s, 'Save world', 'map.bzw', 'BZFlag worlds (*.bzw)')[0]
         if not path: return
+        if not s.offer_cleanup(): return
         try:
             with open(path, 'w', encoding='utf-8') as f: f.write(s.m.text())
         except OSError as e:
