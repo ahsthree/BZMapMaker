@@ -4,7 +4,7 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.4.8** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+**Current release: 1.4.9** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
 <p align="center">
   <img src="assets/images/bzmapmaker-features.jpeg" alt="BZMapMaker Features Overview" width="700">
@@ -18,9 +18,19 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
   <img src="assets/images/bzmm-advanced-display.png" alt="BZMapMaker Advanced Display" width="700">
 </p>
 
-## What's new in 1.4.8
+
+
+## What's new in 1.4.9
+
+- **Internet textures load by themselves.** The `http://` textures a map uses (such as `http://images.bzflag.org/...`) are now downloaded in the background when you open the map, so the 3D view shows them without any button. The picture never waits for the network: faces draw without the texture until it arrives, then fill in. Downloads are remembered on your computer, so the next time (even offline) they appear at once. Turn it off with **View → Load Remote Textures Automatically**. **Fetch All URL Textures** is still there to retry any that failed. See [Materials](#materials).
+- **Texture size.** Select a box, pyramid, arc or cone and use the new **Texture size** field to set BZFlag's `texsize` (4 numbers for a box, pyramid or arc; 2 for a cone). A negative number is the size of one texture tile in world units, a positive one is relative to the object's size, so `1 1 1 1` on a box or pyramid gives one texture per face. Leave it blank and nothing is written, so BZFlag uses its default. Existing `texsize` lines in a map are read and kept. The 3D preview does not apply it.
+- **Arcs are drawn the way BZFlag draws them.** In bzfs an arc's `rotation` does not turn its shape: the ellipse (X size by Y size) always lines up with the world axes, and `rotation` only sets the angle where the first corner, or the start of a partial sweep, sits. The 2D view, 3D view, selection and clicking now do the same, so an elliptical arc looks in the editor the way it does in the game. Round arcs look exactly as before. Groups still turn the whole arc. To point an elliptical arc diagonally, swap its sizes or use a `spin` transform in a group. Symmetry copies of an elliptical arc keep the same axes instead of turning with the copy, as in the game.
+- **`addtexture` is read like `texture`.** Older maps often give a material's picture with `addtexture`; it now fills the Texture field, shows in the 3D view and can be fetched, exactly like `texture`. Maps you don't edit are saved exactly as they were, and any extra `addtexture` layers are kept.
+
+### Also new in 1.4.8
 
 - **Custom object library.** **Objects → Custom Objects** lists ready-made mesh objects (a crate, a lamp post, planters, a street corner...) by category; pick one and click in the 2D or 3D view to place it as a group. You can add your own with **Import into My Objects...** (from any `.bzw`) or **Save Selection to My Objects...** (from your current map), and the materials come along. See [Custom objects](#custom-objects).
+- **Textures in the 3D view, and a faster, smarter one.** Boxes, pyramids, arcs and cones show BZFlag's own default textures when they have no material, as in the game, and faces with a texture show a tiny version of it (shrunk so its longer side is at most 16 pixels, which keeps memory trivial however big the file is) repeated across the surface, plus an optional **edge shading** that darkens the far side of sharp depth steps for a contact-shadow look. Both are switches in the **View** menu. The renderer itself is about 1.6 times faster on busy maps with exactly the same picture, and dropping to half resolution while you orbit now only happens when it actually saves time. See [Notes on the 3D view](#notes-on-the-3d-view).
 - **Remove Unused.** Placing a custom object adds its group definition (and materials) to the map, and deleting the placed copy leaves them behind. **Objects → Remove Unused...** lists the group definitions nothing places, plus the materials, texture matrices and physics drivers only they used, and deletes the ones you leave ticked. Saving can offer to do the same. See [Removing unused groups](#removing-unused-groups-and-materials).
 - **Texture matrices.** **Objects → Texture Matrices...** creates and edits `textureMatrix` blocks (shift, spin and scale, fixed or changing over time), and the Materials dialog has a **Texture matrix** field to give a material one. Existing texture matrices in a map are now read, editable and saved properly instead of just carried through.
 - **Groups can nest and scale.** A group can hold other groups, as in BZFlag itself (a `define` still can't hold another `define`), and a group now has **Scale X/Y/Z** in the panel. Transforms are written in the order BZFlag needs: scale, then rotation, then shift. Teleporters inside nested groups keep their links.
@@ -69,9 +79,9 @@ Download the file for your system from the [Releases](../../releases) page.
 
 | System | File | How to install |
 | --- | --- | --- |
-| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.4.8_all.deb` | `sudo apt install ./bzmapmaker_1.4.8_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
-| Windows | `BZMapMaker-1.4.8-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
-| macOS | `BZMapMaker-1.4.8-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
+| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.4.9_all.deb` | `sudo apt install ./bzmapmaker_1.4.9_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
+| Windows | `BZMapMaker-1.4.9-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
+| macOS | `BZMapMaker-1.4.9-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
 
 To upgrade the `.deb`, install the newer file the same way.
 
@@ -155,11 +165,11 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building the packages yourself
 
-The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.4.8`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
+The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.4.9`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
 
 | Package | Command (run on that OS) | Output |
 | --- | --- | --- |
-| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.4.8_all.deb` |
+| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.4.9_all.deb` |
 | Windows | `build_windows.bat` | `dist\BZMapMaker.exe` and a `.zip` |
 | macOS | `./build_macos.sh` | `dist/BZMapMaker.app` and a `.dmg` |
 
@@ -319,11 +329,14 @@ A few things to know:
 - **Arc:** Top, Bottom, Inside, Outside, Start side, End side (matching BZFlag's own face names)
 - **Cone:** one material only, no per-face override
 
-The 3D view colors each face by its material; the actual texture image isn't drawn (BZFlag texture images live in your game client or on the web, not in this editor). To avoid every textured object just showing up white, though:
+The 3D view colors each face by its material, and where a texture is available it draws a tiny version of it on the face (see Notes on the 3D view). A texture is available when its PNG sits beside the map (or in a `textures` folder there) with the texture's name, when you load a PNG here, or when you fetch an internet texture here. Textures are remembered by name, so it doesn't matter whether you load the PNG before or after naming the material. To avoid every textured object just showing up white when there isn't one:
 
 - **Load PNG...** picks a local image file and automatically sets the material's color to that image's average color (unless you've already set a custom color yourself).
-- **Fetch Color from URL** does the same for a texture given as a web address. This is the *only* thing in the whole app that makes a network request, and only when you click this button.
-- Opening a map that already has a texture file sitting next to it does this automatically too.
+- **Fetch Color from URL** does the same for a texture given as a web address, right now (handy for the one you are typing).
+- Opening a map that already has a texture file sitting next to it does this automatically too, and also keeps the tiny copy for the 3D view. A PNG you add beside the map later is picked up the next time you click **Add / Update** on that material.
+- **Internet textures load automatically.** When you open a map, every `http://` texture its materials use is downloaded in the background (and `https://` ones too, though BZFlag itself only loads `http://`), and the 3D view fills them in as they arrive. This is the only thing in the app that goes online, and it only ever downloads images the map asks for. Copies are kept in a cache folder (`~/.cache/bzmapmaker/textures` on Linux, `%LOCALAPPDATA%\BZMapMaker\cache\textures` on Windows, `~/Library/Caches/BZMapMaker/textures` on macOS) so the next open is instant and works offline; delete the folder to clear it. Untick **View → Load Remote Textures Automatically** to stop the app going online.
+- **Fetch All URL Textures** retries every internet texture that hasn't loaded (for example because you were offline), or loads them all if automatic loading is off.
+- **`addtexture`** is read as the material's texture, the same as `texture`. A map you don't edit is saved exactly as it was; if you edit that material here it is written back as `texture`, and any further `addtexture` layers are kept.
 
 **Texture field / image URLs:** paste a full image URL directly into the Texture field, for example:
 
@@ -335,7 +348,7 @@ http://images.bzflag.org/astevens/concrete.png
 - If the URL isn't under `http://images.bzflag.org/`, a warning appears. It still saves; the warning just tells you BZFlag clients may not download it by default.
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
-Every other material setting from an imported file (`addtexture`, `ambient`, and so on) is preserved exactly even though this editor doesn't expose controls for it. The **Texture matrix** field sets a material's `texmat`; see Texture matrices below.
+Every other material setting from an imported file (`ambient`, `specular`, extra `addtexture` layers, and so on) is preserved exactly even though this editor doesn't expose controls for it. The **Texture matrix** field sets a material's `texmat`; see Texture matrices below.
 
 ### Texture matrices
 
@@ -349,7 +362,7 @@ Every other material setting from an imported file (`addtexture`, `ambient`, and
 | Scale over time | The texture dynamically changes size; u and v frequencies, then u and v scales. |
 | Center | The central point that spin and scale work around. |
 
-To use one, open **Objects → Materials...**, pick the material (it needs a texture) and choose the matrix in its **Texture matrix** field. The matrices are written before the materials that use them. The 3D preview doesn't draw texture images, so you will see the movement in BZFlag itself. Custom objects whose materials use a texture matrix bring it along when you save or place them.
+To use one, open **Objects → Materials...**, pick the material (it needs a texture) and choose the matrix in its **Texture matrix** field. The matrices are written before the materials that use them. The 3D preview shows textures as small approximations and doesn't animate them, so you will see the movement in BZFlag itself. Custom objects whose materials use a texture matrix bring it along when you save or place them.
 
 ### Physics drivers
 
@@ -387,7 +400,7 @@ Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `bo
 - Each teleporter face holds one link in the editor (extra links in a file are kept as written, but not shown).
 - The custom object library has no picture previews yet, only names, categories and descriptions.
 - Comments in the file are lost on save.
-- The 3D preview shows flat material colors (real or approximated from a texture), not actual texture images.
+- Textures in the 3D preview are 16-pixel approximations, repeated every 10 world units by a simple mapping that is not BZFlag's own, so they show the general look rather than exact placement or scale. Texture matrices (movement) are not shown.
 
 **Keep a backup of any map you didn't create in this editor** before saving over it, especially an unusually structured one.
 
@@ -395,9 +408,19 @@ Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `bo
 
 The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order. This fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
 
+It needs no graphics card or OpenGL, which keeps it dependable on school Chromebooks and other low-spec machines. What the picture is made of, from back to front:
+
+- **Base color:** each face's material color, shaded by a simple light direction.
+- **Default textures (View → Show Textures in 3D):** a face with no material gets what BZFlag gives it: boxes and arcs have `boxwall` walls with a `roof` top and bottom, pyramids are `pyrwall`, and cones are `boxwall`. These are 16-pixel versions built into the program, so nothing has to be installed, and nothing about them is written to your map. Give an object (or just one of its faces) a material and that replaces the default. Bases, teleporters, zones and meshes keep plain colors.
+- **Texture (View → Show Textures in 3D):** if the material has a texture, a copy shrunk to at most 16 pixels on its longer side (a 1000 × 1600 picture becomes 10 × 16, under a kilobyte) is repeated across the face, with correct perspective. The picture's own colors are only lightly shaded (down to 75%, against 50% for plain colors) so they stay close to the original. Only that tiny copy is kept, never the full picture, so a huge image can't use up memory.
+- **Edge shading (View → Edge Shading in 3D):** after the picture is drawn, the depth buffer is searched for sharp steps, and the farther side of each is darkened. It is a handful of array operations and costs next to nothing.
+
+**Speed.** Each triangle has a fixed cost for the numbers that place it on screen, so on a map of many small shapes the time depends on how many triangles there are far more than on how many pixels. Each shared corner is now projected once and the per-triangle work is leaner, which made a 340-object test map render about 1.6 times faster with a pixel-for-pixel identical result. While you orbit or drag, the view can drop to half resolution, but that only helps when pixels are what a frame costs, so the program times both and does it only when half resolution is clearly quicker (and the full frame is slow enough to matter). Otherwise it stays sharp.
+
 ## Ideas for the future
 
-- Real texture rendering in the 3D view (the depth buffer already computes exact per-pixel positions, so this is a natural next step)
+- Texture mapping that follows BZFlag's own rules, and showing texture matrices moving
+- An optional OpenGL 3D view for machines with a working graphics card (the lightweight NumPy one would stay the default and the fallback)
 - Editing mesh geometry (not just moving it)
 - An ungroup command
 - Several links per teleporter face
