@@ -6,9 +6,9 @@ Works on Windows, macOS and Linux. The 3D preview is drawn in software (QPainter
 OpenGL is required. Textures are applied to box faces with Qt's 2D projective quadToQuad
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
-import sys, os, re, math, json, copy, types, hashlib, shlex
+import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, urllib.request
 
-__version__ = '1.4.8'
+__version__ = '1.4.9'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QRect, QSize, QSettings, QTimer, QUrl
@@ -93,6 +93,8 @@ class Obj:
     trigger: str = ''; eventteam: int = 1  # weapon only: '' or 'oncap', and which team's cap fires it
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
+    texsize: str = ''  # box / pyramid / arc (4 numbers) or cone (2 numbers): BZW 'texsize' as written; '' = BZFlag's default (nothing is written)
+    trot: float = 0.0  # arc leaf inside groups only: how far the enclosing groups turn the whole shape (see shape_turn)
 
     def __post_init__(s):
         s.mats = dict(s.mats)  # never share the dict between clones
@@ -387,15 +389,20 @@ def parse(text):
                 else: world['extra'].append(' '.join(q))
         elif k == 'material':
             body = read_raw_block()
-            name, tex, color, extra = '', '', (1.0, 1.0, 1.0, 1.0), []
+            name, tex, color, extra, adds = '', '', (1.0, 1.0, 1.0, 1.0), [], []
             for ln in body:
                 q = ln.split(); kk = q[0].lower()
                 if kk == 'name' and len(q) > 1: name = q[1]
                 elif kk == 'texture' and len(q) > 1: tex = q[1]
+                elif kk == 'addtexture' and len(q) > 1: adds.append(ln)  # older maps: same as 'texture' (see below)
                 elif kk in ('diffuse', 'color'):  # 'color' is a synonym for 'diffuse'
                     try: color = tuple(float(c) for c in (q[1:] + ['1', '1', '1', '1'])[:4])
                     except ValueError: pass
                 else: extra.append(ln)
+            if adds:  # 'addtexture' means the same as 'texture': the first one is the material's texture when it has no
+                # 'texture' line, so the preview, the Materials dialog and URL fetching treat it alike. Extra layers stay in `extra`.
+                if not tex: tex = adds.pop(0).split()[1]
+                extra += adds
             name = name or (p[1] if len(p) > 1 else 'mat%d' % (len(materials) + 1))
             materials[name] = Material(name, tex, color, extra, list(body))
         elif k == 'texturematrix':
@@ -562,6 +569,7 @@ def parse(text):
                 o.ratio = nm(v.get('ratio'), (0,))[0]
             if k == 'cone':
                 o.divisions = int(nm(v.get('divisions'), (16,))[0])
+            if k in ('arc', 'cone', 'box', 'pyramid'): o.texsize = ' '.join(v.get('texsize') or [])
             if k == 'pyramid': o.flipz = 'flipz' in v
             hd, hs, hp = 'drivethrough' in v, 'shootthrough' in v, 'passable' in v
             o.phys = 'passable' if (hp or (hd and hs)) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
@@ -689,6 +697,7 @@ def obj_block(o):
         if o.angle != 360: ln.append('  angle %s' % num(o.angle))
         if o.ratio: ln.append('  ratio %s' % num(o.ratio))
     if o.t == 'cone': ln.append('  divisions %d' % o.divisions)
+    if o.t in ('arc', 'cone', 'box', 'pyramid') and o.texsize: ln.append('  texsize %s' % o.texsize)
     if o.t == 'pyramid' and o.flipz: ln.append('  flipz')
     if o.t in ('box', 'pyramid', 'arc', 'cone') and o.phys != 'normal': ln.append('  ' + o.phys)
     if o.t in ('box', 'pyramid', 'arc', 'cone') and o.ricochet: ln.append('  ricochet')
@@ -758,6 +767,41 @@ def user_library_dir():
     if sys.platform == 'darwin':
         return os.path.expanduser('~/Library/Application Support/BZMapMaker/objects')
     return os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'bzmapmaker', 'objects')
+
+
+def texture_cache_dir():
+    """Where downloaded textures are kept so a map opens instantly (and offline) the next time."""
+    if sys.platform == 'win32':
+        return os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'BZMapMaker', 'cache', 'textures')
+    if sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Caches/BZMapMaker/textures')
+    return os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'bzmapmaker', 'textures')
+
+
+def is_remote_texture(name):
+    return bool(name) and name.lower().startswith(('http://', 'https://'))
+
+
+MAX_TEXTURE_BYTES = 8 * 1024 * 1024  # a texture bigger than this is not downloaded for the preview
+
+
+def download_texture(url, timeout=8):
+    """The bytes of an image on the web, or from the disk cache if this URL was fetched before. Raises on failure.
+    Safe to call from a background thread."""
+    key = os.path.join(texture_cache_dir(), hashlib.sha1(url.encode('utf-8')).hexdigest() + '.img')
+    try:
+        with open(key, 'rb') as f: return f.read()
+    except OSError: pass
+    req = urllib.request.Request(url, headers={'User-Agent': 'BZMapMaker/' + __version__})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read(MAX_TEXTURE_BYTES + 1)
+    if len(data) > MAX_TEXTURE_BYTES: raise ValueError('image is too large')
+    try:
+        os.makedirs(os.path.dirname(key), exist_ok=True)
+        with open(key + '.part', 'wb') as f: f.write(data)
+        os.replace(key + '.part', key)
+    except OSError: pass  # no cache is fine, just slower next time
+    return data
 
 
 def system_library_dirs():
@@ -978,9 +1022,14 @@ def import_into_library(src, name, category, description, split=False, directory
 
 class Model(QObject):
     changed = pyqtSignal(); selected = pyqtSignal(); reset = pyqtSignal(); warn = pyqtSignal(str)
+    _tex_ready = pyqtSignal()  # a background download finished (emitted from the worker thread, handled on the main one)
 
     def __init__(s):
         super().__init__()
+        if not hasattr(s, '_tex_done'):  # File > New runs __init__ again; that must not reset these or double-connect
+            s.remote_textures = True  # View menu: fetch http(s) textures in the background; Win sets it from the saved settings
+            s._tex_pending, s._tex_done = set(), queue.Queue()
+            s._tex_ready.connect(s._collect_textures)
         s.W, s.objs, s.sel, s.msel, s.undo, s.path = 400, [], None, [], [], None
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.options_text = ''
@@ -1066,6 +1115,63 @@ class Model(QObject):
             if n in s.texmats and n not in ref: del s.texmats[n]; gone['texmats'].append(n)
         s.changed.emit()
         return gone
+
+    def texture_file(s, texture):
+        """Path of a texture's PNG next to the map (or in a 'textures' folder beside it), if there is one."""
+        if not texture or '://' in texture or not s.path: return None
+        base = os.path.dirname(s.path); name = texture if texture.lower().endswith('.png') else texture + '.png'
+        for folder in (base, os.path.join(base, 'textures')):
+            p = os.path.join(folder, name)
+            if os.path.isfile(p): return p
+        return None
+
+    def texture_array(s, texture):
+        """The tiny preview copy of a texture (or None), found the first time it is asked for. The cache is
+        keyed by the texture's name, so it doesn't matter when or under what material name it was loaded, and
+        it survives reloading the map text. A miss is remembered too, so a missing file isn't searched for
+        on every redraw."""
+        if not texture: return None
+        if texture not in s.texcache:
+            if is_remote_texture(texture):  # never block the picture on the network: draw without it until it arrives
+                if s.remote_textures: s.fetch_remote(texture)
+                return None
+            p = s.texture_file(texture); img = QImage(p) if p else None
+            s.texcache[texture] = micro_texture(img) if img is not None and not img.isNull() else None
+        return s.texcache[texture]
+
+    def fetch_remote(s, url):
+        """Start downloading an internet texture on a background thread (once per URL). When it lands, the tiny
+        preview copy goes into the cache and the views redraw. A failed download is remembered as a miss, so an
+        offline or dead link isn't retried on every redraw; Objects > Materials > Fetch All URL Textures retries."""
+        if url in s._tex_pending or url in s.texcache: return
+        s._tex_pending.add(url)
+        threading.Thread(target=s._fetch_worker, args=(url,), daemon=True).start()
+
+    def prefetch_remote(s):
+        """Start fetching every internet texture the map's materials use (called when a map is opened)."""
+        if not s.remote_textures: return
+        for url in sorted({m.texture for m in s.materials.values() if is_remote_texture(m.texture)}):
+            s.fetch_remote(url)
+
+    def _fetch_worker(s, url):
+        arr = avg = None
+        try:
+            img = QImage()
+            if img.loadFromData(download_texture(url)):  # QImage (unlike QPixmap) may be used off the main thread
+                arr, avg = micro_texture(img), average_color(img)
+        except Exception: pass
+        s._tex_done.put((url, arr, avg)); s._tex_ready.emit()
+
+    def _collect_textures(s):
+        got = False
+        while True:
+            try: url, arr, avg = s._tex_done.get_nowait()
+            except queue.Empty: break
+            s._tex_pending.discard(url); s.texcache[url] = arr; got = True
+            if arr is not None and avg is not None:
+                for mat in s.materials.values():
+                    if mat.texture == url and tuple(mat.color) == (1.0, 1.0, 1.0, 1.0): mat.color = avg  # as for local textures
+        if got: s.changed.emit()
 
     def tele_names(s):
         """Every teleporter name in the map: top-level ones and ones inside group prefabs."""
@@ -1437,7 +1543,6 @@ class Model(QObject):
         s.extras = extras; s.options_text = options_text; s.physics = physics; s.texmats = texmats
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
-        s.texcache = {}
         s.reset.emit(); s.selected.emit(); s.changed.emit()
 
     def text(s):
@@ -1493,6 +1598,19 @@ class Model(QObject):
 MAX_NEST = 12  # deepest group-in-group chain followed (also stops a group that contains itself)
 
 
+def shape_turn(o):
+    """How far an object's whole outline is turned about its centre. For most objects that is its `rotation`. In BZFlag an
+    arc's `rotation` does not turn its outline: the arc is an ellipse lined up with the world axes (X size by Y size) and
+    `rotation` only moves the angle its first corner (and the start of a partial sweep) sits at. Only the enclosing groups
+    turn the ellipse itself, and that part is kept in `trot` (see _place)."""
+    return o.trot if o.t == 'arc' else o.r
+
+
+def arc_phase(o):
+    """The angle (degrees, counter-clockwise) at which an arc's first corner / sweep start sits on its ellipse."""
+    return o.r - o.trot
+
+
 def _place(kd, g):
     """kd (an object inside group instance g's prefab) placed into g's parent frame.
     A group's transform is scale, then rotation about Z, then shift. A non-uniform scale on a
@@ -1502,6 +1620,7 @@ def _place(kd, g):
     leaf = replace(kd)
     leaf.x, leaf.y, leaf.z = g.x + px * c - py * sn, g.y + px * sn + py * c, g.z + pz
     leaf.r = (kd.r + g.r) % 360
+    if kd.t == 'arc': leaf.trot = (kd.trot + g.r) % 360
     if kd.t == 'mesh':  # a mesh keeps its own geometry; the chain's scale and shift go on the leaf
         leaf.sx = leaf.sy = leaf.sz = 0
         leaf.mscale = (g.sx * kd.mscale[0], g.sy * kd.mscale[1], g.sz * kd.mscale[2])
@@ -1595,7 +1714,7 @@ class Editor(QWidget):
             hx, hy = (max(leaf.sx, leaf.sy, 5) if leaf.t == 'group' else leaf.sx), leaf.sy
             if leaf.t == 'group': hx, hy = s.m.group_bounds(leaf.name)
             elif leaf.t == 'weapon': hx, hy = 14, 6  # matches the arrow marker's drawn extent
-            a = math.radians(leaf.r); dx, dy = wx - leaf.x, wy - leaf.y
+            a = math.radians(shape_turn(leaf)); dx, dy = wx - leaf.x, wy - leaf.y
             lx = dx * math.cos(a) + dy * math.sin(a); ly = -dx * math.sin(a) + dy * math.cos(a)
             if abs(lx) <= max(hx, 1) + pad and abs(ly) <= hy + pad: return src
 
@@ -1613,7 +1732,7 @@ class Editor(QWidget):
                 p.setPen(cpen(ACC, 2.5, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(QRectF(x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad))
             return
-        p.save(); p.translate(leaf.x, leaf.y); p.rotate(leaf.r)  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
+        p.save(); p.translate(leaf.x, leaf.y); p.rotate(shape_turn(leaf))  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
         if leaf.t == 'group':
             hx, hy = s.m.group_bounds(leaf.name)
             p.setPen(cpen('#98a0a8', 1, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1623,7 +1742,10 @@ class Editor(QWidget):
             if leaf.t == 'cone' or leaf.angle >= 360:
                 path.addEllipse(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
             else:
-                path.moveTo(0, 0); path.arcTo(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy), 0, -leaf.angle)
+                ph = arc_phase(leaf) if leaf.t == 'arc' else 0.0  # same points as the 3D view, so the sweep starts where bzfs starts it
+                path.moveTo(0, 0)
+                for i in range(65):
+                    a = math.radians(ph + leaf.angle * i / 64); path.lineTo(leaf.sx * math.cos(a), leaf.sy * math.sin(a))
                 path.closeSubpath()
             c = QColor(COL[leaf.t]); p.setPen(cpen('#22262b')); p.setBrush(c); p.drawPath(path)
             if leaf.t == 'arc' and leaf.ratio:
@@ -1693,7 +1815,7 @@ class Editor(QWidget):
             twin = src is not s.m.sel and s.m.sel and src.fam and src.fam == s.m.sel.fam
             s.draw_leaf(p, leaf, src is s.m.sel)
             if twin:
-                p.save(); p.translate(leaf.x, leaf.y); p.rotate(leaf.r)  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
+                p.save(); p.translate(leaf.x, leaf.y); p.rotate(shape_turn(leaf))  # the view is y-up, so +rotation is counter-clockwise, same as the 3D view
                 pad = 3 / S; a, b = max(leaf.sx, 1), leaf.sy
                 p.setPen(cpen(ACC, 1.5, Qt.PenStyle.DotLine)); p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(QRectF(-a - pad, -b - pad, 2 * a + 2 * pad, 2 * b + 2 * pad)); p.restore()
@@ -1878,12 +2000,120 @@ def launch_trajectory(start, linear, steps=24):
     return pts, pts[-1]
 
 
-def raster_triangle(zbuf, cbuf, pts, depths, rgba):
+# 16 x 16 RGB versions of BZFlag's own default textures, built into the program (base64 of the raw pixels).
+# BZFlag draws a box, pyramid, arc or cone with these when it has no material, so the 3D preview does too.
+DEFAULT_TEX_DATA = {
+    'boxwall': (
+        'jmJhjWFhhVdWgVVVd0pLg1ZWhlVQi1xYi1lXfVBOgVFPeE1IiFtWfE1Ie09LglZUdUxNflNSgFVU'
+        'cEhIdERBeU5NfE5LgFFNfExKbENEfExKdkpHhFNOektGgFBLgVFMfVNTelBOeU9NaEFBfkxFdUpH'
+        'fU5JhFNNb0NAakFAfVBPZj47ekpDZTo2VjEucUVBfFBPfVJRbEVDa0VEd0pHc0hEcUZCdEVCc0xO'
+        'iF1efVRVelNTeUdDaTw5gVVVil9diVxaek9NaT47Xzg2bkE+dEdEc0ZDekZCdU9PbkdKeE9Sd01O'
+        'cT47aTk2g1dVkWRihlhWh1hYgFJPfFBNfExHfFBOaj8+dEZDeFFSfVVVf1ZXcUlKazs2eElGd01M'
+        'lWZjeUhGbD8+bz49b0FAeUZGdEJCdEREeUlHaT4+aT49Zjg4WDAvZTk4dUZGbUFBfE9Oe0VChU9P'
+        'bDo5gUtKfURDf0pKgElJhU5OgExMdkVEYzMzYDU1fklFekRBdUNCd01KgkxKfktLajo5e0dHfEZE'
+        'f0tLh1BOgUtKfEdGdkREaDY3XzIzfUhFdkE+dkNEekxIdUhJZDw9Zz09cURFdUdHcUNCd0hIgE1M'
+        'bkNDelJSakNFXzs8ZkFBYzw8a0NCdEhHgVFSdEhHd0pJfk9MgE5Md0ZEfE1MhU1Lf09Pil5fgVhZ'
+        'flZYbERHcEhJa0NEeUpJfU1McUVFdEdGhVNRekhGfUtId0dGilFNfk9Oek5Nek9PflRWb0dIa0RF'
+        'cEhJgU9Nd0lKa0BAcUZFbUNCYDY1c0ZDdkpMcUNDbENFZDs6ZT08Yjw+bEVGa0NDaEJBbEJChVta'
+        'eU9NeVJUiF9hdUxNjGNjhVxde1NWflZabklJd09QeVJVZj9CfFJPfFNWg1pbgVdVdEtKeFBRhFtb'
+        'fVZUg1lZelJRflZZfFRYYz4+bEZHfVVWakJEg1lYeVBQgFdYfVJQeU5McktMfVJRelBPgFRUgVVT'
+        'g1ZUglRTZ0FAcUhFhltZf1VWgVZTcElKelBP'
+    ),
+    'pyrwall': (
+        'F05qJWF9K2mELWuGIFt3E0ZjF0xoH1l1KGWAG1NvEkZiFUtnF05qJ2N/JWF9JGB8IVx5H1h1Hlh1'
+        'KGR/KGSAFktoFkxoGlJuIVx4IFp2FEhlE0ZjEURgF05qHFRwG1RwHVZzIFp2Hld0JmJ+J2SAHFRw'
+        'HFZyHVZyH1l1HFRwFkxpD0BcDj5aDDxXGlJuIlx5HVZyIFp2H1dzIFp3IFp2HVZyHFVxI115JmF9'
+        'HVZyF05qEEBcEURgEUNfFEhkF0xpGlJuHVZyHld0Hlh0HFVyHFRxHFVxFEpmH1l1GE9sF01qFktn'
+        'DT5aDj5aCjVQFUpmGE5rIVx4Il56G1RwHVZzH1p2J2N+IVt3JmJ9Il56GVBsF01pE0djEEFdCjZR'
+        'D0BbEEJeFEllFkxoH1h0Hlh0IFp2KGWBIFp3J2F9I115F05qGE9rEURfDz1ZEUNfCjZREkdjGE9r'
+        'FEllEENgG1RwG1NwHldzI156GlJuHVd0GVFtHFVyEUJeCzhTDTxYFEllH1l2H1h0EUNfFUlmFUll'
+        'IFt3JWB8JF97F01pJWB8KGWBJWB8JF56EkVhF0xoHFRwJWF9GlJvGE5qFEhkD0BcGVFuGVFtHldz'
+        'JmF9GlNvH1p2KGWBI197HFRwFEhlGVFtIl15GlJuF05qEkVhDz9bD0BcHlZyHlh0IV15IFl2Il15'
+        'K2iDI197H1l1HVZyH1p2Il56IFp3G1NwGVBsDT1ZDz9bFEllHVZzJWF9H1h0HFRxH1l2JmJ+JWB8'
+        'IFp3Hlh0G1RwHFRxFUtnD0BcFEhlCjVQDDpWFEhkFUpmIFt3G1RxHVdzHlh0GVFtGFBsFkxpIFp2'
+        'J2J9E0hlFUtnE0ZiDjxXDDhTDTtXFkxoIlx4IVx4GlFtHFVxHFVxJ2J+IVt3IVt4HldzHFNvFkxo'
+        'Dj1ZCzhTCzhTDTxXEUNfEUNfFEllFUtnIFp2I115JWF9HFVyIFp3HVZyHFVxIVt4EUFdDj5ZE0Zi'
+        'EkVhGE9rF05qF05qGU9sFkxpI156Hld0JWB8'
+    ),
+    'roof': (
+        'm5ubnZ2doaGhnJyck5OTm5ubl5eXmZmZm5ubmZmZmpqam5ubm5ubnJycl5eXoKCgoKCgm5ubnZ2d'
+        'nZ2dmZmZpKSklJSUlZWVmpqampqanZ2dlpaWmpqam5ubnJycoaGhnp6em5ubl5eXlJSUm5uboqKi'
+        'np6empqampqanJycn5+fl5eXoKCgoKCgm5ubn5+fo6Ojm5ubnp6em5ubkZGRlZWVoaGhnp6em5ub'
+        'nZ2dnJycmpqaoqKioKCgmZmZoaGhmpqanp6enJycm5ubkJCQlZWVm5ubm5ubmZmZlZWVmZmZmZmZ'
+        'oKCgoqKil5eXnZ2dlpaWk5OTmpqalJSUlpaWmpqamZmZl5eXlpaWlZWVnZ2dk5OTkJCQn5+fnp6e'
+        'lpaWnZ2dkpKSmJiYm5ublZWVmJiYmJiYm5ubl5eXmJiYnZ2dnp6el5eXmJiYlpaWm5ubnZ2dmZmZ'
+        'mpqan5+foKCgmJiYlZWVmJiYm5ubl5eXmpqanZ2dn5+flJSUmZmZnp6enp6emJiYmJiYn5+fl5eX'
+        'mJiYlpaWmpqanJycmZmZl5eXmZmZnZ2dmpqan5+fn5+fn5+fmJiYlpaWnJycmpqanJyckZGRmZmZ'
+        'mpqamZmZmZmZmpqak5OTlZWVmJiYmpqanp6em5ublZWVmZmZmZmZm5ublJSUnp6enJycm5ubk5OT'
+        'lJSUnp6em5ubnp6eoaGhm5ublZWVmpqanZ2do6Ojnp6empqampqamJiYo6OjnJyco6Ojm5ubn5+f'
+        'nZ2dnZ2dmpqanJycnZ2dnZ2dmZmZmpqalpaWoKCgpaWlmpqan5+foKCgmpqam5ubk5OTn5+foKCg'
+        'oKCgmJiYm5ubl5eXmpqampqampqal5eXmZmZlJSUl5eXkpKSn5+foKCgoaGhoaGhlpaWl5eXl5eX'
+        'lpaWmpqaoKCglpaWmZmZmZmZmpqalpaWoaGhnZ2dmJiYn5+fmpqanZ2do6OjnJycmJiYk5OTmJiY'
+        'mJiYm5ubnZ2dmpqamZmZoaGhm5ubl5eXn5+f'
+    ),
+}
+_DEFAULT_TEX = {}
+
+
+def default_texture_name(kind, face):
+    """The texture BZFlag puts on a face when no material is given: boxes and arcs have boxwall walls and a roof
+    top and bottom, pyramids are pyrwall, cones are boxwall. None for everything else."""
+    if kind in ('box', 'arc'): return 'roof' if face in ('top', 'bottom') else 'boxwall'
+    if kind == 'pyramid': return 'pyrwall'
+    if kind == 'cone': return 'boxwall'
+    return None
+
+
+def default_texture(name):
+    """The built-in 16 x 16 texture called name, as a rows x columns x 3 array."""
+    if name not in _DEFAULT_TEX:
+        _DEFAULT_TEX[name] = np.frombuffer(base64.b64decode(''.join(DEFAULT_TEX_DATA[name])), dtype=np.uint8).reshape(16, 16, 3)
+    return _DEFAULT_TEX[name]
+
+
+TEX_MAX_SIDE = 16  # a texture kept for the 3D preview is shrunk until its longer side is at most this many pixels
+TEX_TILE = 10.0    # world units one repeat of a texture covers in the preview (an approximation of BZFlag's mapping)
+
+
+def fit_side(w, h, side=TEX_MAX_SIDE):
+    """Size an image shrinks to so its longer side is at most `side` pixels, keeping its shape
+    (1000 x 1600 becomes 10 x 16). Never enlarges."""
+    if max(w, h) <= side: return max(w, 1), max(h, 1)
+    k = side / max(w, h)
+    return max(1, round(w * k)), max(1, round(h * k))
+
+
+def micro_texture(img, side=TEX_MAX_SIDE):
+    """A tiny RGB copy of a QImage as a numpy array (rows x columns x 3), for the 3D preview. Keeping only
+    this, never the full picture, caps a texture at about a kilobyte however large the file was."""
+    if img.isNull(): return None
+    w, h = fit_side(img.width(), img.height(), side)
+    small = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    small = small.convertToFormat(QImage.Format.Format_RGBA8888)
+    ptr = small.constBits(); ptr.setsize(small.sizeInBytes())
+    return np.frombuffer(ptr, dtype=np.uint8).reshape(h, small.bytesPerLine() // 4, 4)[:, :w, :3].copy()
+
+
+def planar_uvs(tri, tile=TEX_TILE):
+    """Texture coordinates for a triangle of three (x, y, z) points: flat faces map by their ground position,
+    walls run along their own horizontal direction with the picture upright. Texture units, not pixels."""
+    (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = tri
+    ax, ay, az = x1 - x0, y1 - y0, z1 - z0; bx, by, bz = x2 - x0, y2 - y0, z2 - z0
+    nx, ny, nz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+    hor = math.hypot(nx, ny)
+    if abs(nz) >= hor or hor < 1e-9: return [(p[0] / tile, p[1] / tile) for p in tri]  # floor or roof
+    tx, ty = -ny / hor, nx / hor
+    return [((p[0] * tx + p[1] * ty) / tile, -p[2] / tile) for p in tri]
+
+
+def raster_triangle(zbuf, cbuf, pts, depths, rgba, tex=None, uvs=None, shade=1.0):
     """Fill zbuf/cbuf in place with this triangle wherever it's the nearest thing seen so
     far at that pixel. pts: ((x0,y0),(x1,y1),(x2,y2)) screen coords; depths: (z0,z1,z2),
     smaller = nearer the camera. This replaces sorting whole faces back-to-front (which is
     what let a long face's single average position misplace it relative to other objects)
     with a genuine per-pixel depth test, so draw order stops mattering entirely.
+    With tex (a small rows x columns x 3 array) and uvs (one (u, v) per corner) the pixels take
+    their colour from the texture, repeating it, shaded by `shade`, instead of the flat rgba.
     """
     h, w = zbuf.shape
     (x0, y0), (x1, y1), (x2, y2) = pts
@@ -1892,7 +2122,9 @@ def raster_triangle(zbuf, cbuf, pts, depths, rgba):
     if minx > maxx or miny > maxy: return
     denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
     if abs(denom) < 1e-9: return  # edge-on / degenerate triangle
-    xs, ys = np.meshgrid(np.arange(minx, maxx + 1, dtype=np.float32), np.arange(miny, maxy + 1, dtype=np.float32))
+    # A row and a column broadcast against each other: same numbers as a full meshgrid, without building one
+    xs = np.arange(minx, maxx + 1, dtype=np.float32)
+    ys = np.arange(miny, maxy + 1, dtype=np.float32)[:, None]
     w0 = ((y1 - y2) * (xs - x2) + (x2 - x1) * (ys - y2)) / denom
     w1 = ((y2 - y0) * (xs - x2) + (x0 - x2) * (ys - y2)) / denom
     w2 = 1.0 - w0 - w1
@@ -1903,7 +2135,45 @@ def raster_triangle(zbuf, cbuf, pts, depths, rgba):
     nearer = inside & (depth < zslice)
     if not nearer.any(): return
     zslice[nearer] = depth[nearer]
-    cbuf[miny:maxy + 1, minx:maxx + 1][nearer] = rgba
+    block = cbuf[miny:maxy + 1, minx:maxx + 1]
+    if tex is None or uvs is None:
+        block[nearer] = rgba
+        return
+    # Perspective-correct texture coordinates: u/z, v/z and 1/z vary evenly across the screen
+    i0, i1, i2 = 1.0 / depths[0], 1.0 / depths[1], 1.0 / depths[2]
+    a0, a1, a2 = w0[nearer] * i0, w1[nearer] * i1, w2[nearer] * i2
+    inv = a0 + a1 + a2
+    u = (a0 * uvs[0][0] + a1 * uvs[1][0] + a2 * uvs[2][0]) / inv
+    v = (a0 * uvs[0][1] + a1 * uvs[1][1] + a2 * uvs[2][1]) / inv
+    th, tw = tex.shape[:2]
+    texel = tex[np.floor(v * th).astype(np.int64) % th, np.floor(u * tw).astype(np.int64) % tw]
+    block[nearer, :3] = (texel * shade).astype(np.uint8)
+    block[nearer, 3] = rgba[3]
+
+
+def edge_shade(zbuf, cbuf, rel=0.05, dark=0.62):
+    """Darken the farther side of every sharp step in depth, like the contact shadow where one thing
+    stands in front of another. Works on the finished depth buffer, so it costs a few array operations
+    and no lighting maths. Steps against empty background are left alone."""
+    h, w = zbuf.shape
+    if h < 2 or w < 2: return
+    fin = np.isfinite(zbuf); z = np.where(fin, zbuf, 0.0); dark_px = np.zeros((h, w), dtype=bool)
+    for (a, b_, both, sa, sb) in (
+            (z[:, :-1], z[:, 1:], fin[:, :-1] & fin[:, 1:], (slice(None), slice(None, -1)), (slice(None), slice(1, None))),
+            (z[:-1, :], z[1:, :], fin[:-1, :] & fin[1:, :], (slice(None, -1), slice(None)), (slice(1, None), slice(None)))):
+        step = both & (np.abs(a - b_) > rel * np.minimum(a, b_))
+        dark_px[sa] |= step & (a > b_)  # the farther pixel of the pair is the one in shadow
+        dark_px[sb] |= step & (b_ > a)
+    if dark_px.any(): cbuf[dark_px, :3] = (cbuf[dark_px, :3] * dark).astype(np.uint8)
+
+
+def choose_lod(ms_full, ms_half, budget=70.0):
+    """Resolution to draw at while the view is being moved: 1 (full) or 2 (half). Dropping resolution only
+    pays when pixels are what the frame costs; on a map of many small shapes it barely helps, so it is used
+    only when the full-size frame is slow and the half-size one measurably faster. None = not measured yet."""
+    if ms_full is not None and ms_full <= budget: return 1
+    if ms_full is not None and ms_half is not None and ms_half > 0.85 * ms_full: return 1
+    return 2
 
 
 class Preview(QWidget):
@@ -1914,6 +2184,9 @@ class Preview(QWidget):
         s.m, s.yaw, s.pitch, s.dist, s.last, s.act, s.space = m, .5, .55, 1100., None, None, False
         # _lod > 1 = render at 1/_lod resolution while orbiting/dragging (big speed-up on complex maps)
         s._lod, s._rw, s._rh, s._hires_timer = 1, None, None, QTimer(s)
+        s.edge_shading, s.show_textures = True, True  # View menu; Win sets them from the saved settings
+        s._deftex = {}  # id of a face colour -> built-in default texture name (faces with no material)
+        s._ms, s._matof = {}, {}  # recent frame cost (ms) at each resolution; material name of each face's colour
         s._hires_timer.setSingleShot(True)
         s._hires_timer.timeout.connect(s._finish_lod)
         s.setMinimumSize(320, 240); s.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1938,9 +2211,10 @@ class Preview(QWidget):
                        h / 2 - sum(d[i] * u[i] for i in range(3)) * k)
 
     def _begin_lod(s):
-        """Drop to half-res while the user is orbiting or dragging; full-res resumes shortly after."""
+        """Drop to half-res while the user is orbiting or dragging, but only when that measurably helps
+        (see choose_lod); full-res resumes shortly after."""
         if s._lod == 1:
-            s._lod = 2
+            s._lod = choose_lod(s._ms.get(1), s._ms.get(2))
         s._hires_timer.stop()
 
     def _finish_lod(s):
@@ -1953,7 +2227,7 @@ class Preview(QWidget):
 
     def solids(s):
         """Return (points, color, source_obj, texinfo) faces, texinfo=None or (pixmap, uv0..uv3)."""
-        F = []
+        F = []; s._matof = {}; s._deftex = {}
         for leaf, src in expand(s.m):
             o = leaf
             if o.t == 'mesh':
@@ -1967,8 +2241,10 @@ class Preview(QWidget):
                 if s.m.show_zones:
                     F += s.zone_faces(o, P, z1)
                 continue
-            if o.t == 'arc':
-                F += s.arc_faces(o, P, z0, z1, C); continue
+            if o.t == 'arc':  # the ellipse is only turned by enclosing groups; o.r is where its corners start (see shape_turn)
+                ta = math.radians(o.trot); ct, st = math.cos(ta), math.sin(ta)
+                PA = lambda lx, ly, z: (o.x + lx * ct - ly * st, o.y + lx * st + ly * ct, z)
+                F += s.arc_faces(o, PA, z0, z1, C); continue
             if o.t == 'cone':
                 F += s.cone_faces(o, P, z0, z1, C('')); continue
             if o.t == 'pyramid':
@@ -1998,6 +2274,7 @@ class Preview(QWidget):
             if mat in s.m.materials:
                 c = s.m.materials[mat].color
                 col = QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
+                s._matof[id(col)] = mat
             out.append((pts, col, src, None))
         return out
 
@@ -2022,14 +2299,22 @@ class Preview(QWidget):
         name = o.mats.get(face) or o.matref
         if name in s.m.materials:
             c = s.m.materials[name].color
-            return QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
+            col = QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
+            s._matof[id(col)] = name  # lets the renderer find this face's texture
+            return col
+        kind = default_texture_name(o.t, face)
+        if kind:  # no material: BZFlag's default texture for this kind of face (a copy, so each face can differ)
+            col = QColor(default.red(), default.green(), default.blue(), default.alpha())
+            s._deftex[id(col)] = kind
+            return col
         return default
 
     def arc_faces(s, o, P, z0, z1, C):
         N, A, ratio = max(3, o.divisions), o.angle, o.ratio
         full = A >= 360
         pts = N + 1 if not full else N
-        ang = lambda i: math.radians(A * i / N)
+        ph = math.radians(arc_phase(o))
+        ang = lambda i: ph + math.radians(A * i / N)
         outer = [P(o.sx * math.cos(ang(i)), o.sy * math.sin(ang(i)), 0) for i in range(pts)]
         segs = pts if full else pts - 1
         V = lambda q, z: (q[0], q[1], z)
@@ -2070,6 +2355,55 @@ class Preview(QWidget):
             F.append(([ctr, (ring[j][0], ring[j][1], z0), (ring[i][0], ring[i][1], z0)], col, o, None))
         return F
 
+    def render_buffers(s, w_px, h_px, B):
+        """Rasterize the map into a depth buffer and an RGBA colour buffer of w_px x h_px, with no Qt painting
+        involved. Returns (zbuf, cbuf, faces of the selected object). Each vertex of a face is projected once,
+        however many of the face's triangles share it."""
+        pos, f, r_, u_ = B; L = math.sqrt(sum(x * x for x in s.LIGHT))
+        px, py, pz = pos; fx, fy, fz = f; rx, ry, rz = r_; ux, uy, uz = u_
+        half_w, half_h, kk = w_px / 2, h_px / 2, h_px * .9
+        zbuf = np.full((h_px, w_px), np.inf, dtype=np.float32)
+        cbuf = np.zeros((h_px, w_px, 4), dtype=np.uint8)
+        sel_faces = []  # original (untriangulated) faces of the selected object, for its outline
+        light = s.LIGHT; materials = s.m.materials
+        for pts, col, o, tex in s.solids():
+            if o is s.m.sel: sel_faces.append(pts)
+            opaque = (col.alpha() or 255) >= 250
+            texarr = None
+            if s.show_textures:
+                name = s._matof.get(id(col))
+                if name and name in materials: texarr = s.m.texture_array(materials[name].texture)
+                elif id(col) in s._deftex: texarr = default_texture(s._deftex[id(col)])
+            n = len(pts)
+            corners = ((0, 1, 2),) if n <= 3 else [(0, i, i + 1) for i in range(1, n - 1)]
+            proj = {}
+            for ia, ib, ic in corners:
+                a, b_, c = pts[ia], pts[ib], pts[ic]
+                # Back-face cull (opaque only). Camera looks along +f; outward normal n_ facing
+                # the same way as f means the face is facing away and can be skipped.
+                u = (b_[0] - a[0], b_[1] - a[1], b_[2] - a[2]); w_ = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+                n_ = (u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0])
+                if opaque and n_[0] * fx + n_[1] * fy + n_[2] * fz > 0: continue
+                screen = []
+                for i in (ia, ib, ic):
+                    if i not in proj:
+                        q = pts[i]; dx, dy, dz = q[0] - px, q[1] - py, q[2] - pz
+                        zc = dx * fx + dy * fy + dz * fz
+                        proj[i] = None if zc < 5 else (half_w + (dx * rx + dy * ry + dz * rz) * (kk / zc),
+                                                       half_h - (dx * ux + dy * uy + dz * uz) * (kk / zc), zc)
+                    screen.append(proj[i])
+                if None in screen: continue  # a vertex behind the camera: skip
+                nl = math.sqrt(n_[0] * n_[0] + n_[1] * n_[1] + n_[2] * n_[2]) or 1
+                lit = abs(n_[0] * light[0] + n_[1] * light[1] + n_[2] * light[2]) / (nl * L)
+                k = .5 + .5 * lit
+                rgba = (int(col.red() * k), int(col.green() * k), int(col.blue() * k), col.alpha() or 255)
+                xy = [(q[0], q[1]) for q in screen]; zz = [q[2] for q in screen]
+                # a texture is only lightly shaded (down to 75%) so its colours stay close to the picture's own
+                if texarr is not None: raster_triangle(zbuf, cbuf, xy, zz, rgba, texarr, planar_uvs((a, b_, c)), .75 + .25 * lit)
+                else: raster_triangle(zbuf, cbuf, xy, zz, rgba)
+        if s.edge_shading: edge_shade(zbuf, cbuf)
+        return zbuf, cbuf, sel_faces
+
     def paintEvent(s, _):
         p = QPainter(s); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(s.rect(), QColor('#1b2026')); B = s.basis(); h = s.m.W
@@ -2086,39 +2420,19 @@ class Preview(QWidget):
                 pa, pb = s.proj(B, a), s.proj(B, b)
                 if pa and pb: p.drawLine(pa, pb)
             v += 50
-        pos, f, _, _ = B; L = math.sqrt(sum(x * x for x in s.LIGHT))
-
-        def tris(pts):  # a face is drawn as one or more planar triangles
-            return [pts] if len(pts) <= 3 else [(pts[0], pts[i], pts[i + 1]) for i in range(1, len(pts) - 1)]
-
+        t0 = time.perf_counter()
         lod = max(1, int(s._lod))
         full_w, full_h = max(1, s.width()), max(1, s.height())
         w_px, h_px = max(1, full_w // lod), max(1, full_h // lod)
         s._rw, s._rh = w_px, h_px  # proj() uses these while we rasterize at reduced size
-        zbuf = np.full((h_px, w_px), np.inf, dtype=np.float32)
-        cbuf = np.zeros((h_px, w_px, 4), dtype=np.uint8)
-        sel_faces = []  # original (untriangulated) faces of the selected object, for its outline
-        for pts, col, o, tex in s.solids():
-            if o is s.m.sel: sel_faces.append(pts)
-            for tri in tris(pts):
-                # Back-face cull (opaque only). Camera looks along +f; outward normal n_ facing
-                # the same way as f means the face is facing away and can be skipped.
-                u = [tri[1][j] - tri[0][j] for j in range(3)]; w_ = [tri[2][j] - tri[0][j] for j in range(3)]
-                n_ = (u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0])
-                if (col.alpha() or 255) >= 250 and sum(n_[i] * f[i] for i in range(3)) > 0:
-                    continue
-                screen = [s.proj(B, v) for v in tri]
-                if None in screen: continue  # a vertex behind the camera: skip, same as before
-                depths = [sum((tri[i][j] - pos[j]) * f[j] for j in range(3)) for i in range(3)]
-                nl = math.sqrt(sum(x * x for x in n_)) or 1
-                k = .5 + .5 * abs(sum(n_[i] * s.LIGHT[i] for i in range(3))) / (nl * L)
-                rgba = (int(col.red() * k), int(col.green() * k), int(col.blue() * k), col.alpha() or 255)
-                raster_triangle(zbuf, cbuf, [(pt.x(), pt.y()) for pt in screen], depths, rgba)
+        zbuf, cbuf, sel_faces = s.render_buffers(w_px, h_px, B)
         s._rw = s._rh = None
         img = QImage(cbuf.data, w_px, h_px, w_px * 4, QImage.Format.Format_RGBA8888).copy()
         if lod > 1:
             img = img.scaled(full_w, full_h, Qt.AspectRatioMode.IgnoreAspectRatio,
                              Qt.TransformationMode.FastTransformation)
+        ms = (time.perf_counter() - t0) * 1000  # remembered so choose_lod can tell whether pixelating pays
+        if lod in (1, 2): s._ms[lod] = ms if lod not in s._ms else .6 * s._ms[lod] + .4 * ms
         p.drawImage(0, 0, img)
         for pts in sel_faces:  # outline the selected object on top of the rasterized image
             pg = poly(pts)
@@ -2224,7 +2538,7 @@ class Preview(QWidget):
                 if leaf.t == 'group': hx, hy = s.m.group_bounds(leaf.name)
                 elif leaf.t == 'weapon': hx, hy = 14, 6  # matches the arrow marker's drawn extent
                 else: hx, hy = leaf.sx, leaf.sy
-                t = ray_box_hit(origin, direction, leaf.x, leaf.y, leaf.z, hx, hy, leaf.sz, leaf.r)
+                t = ray_box_hit(origin, direction, leaf.x, leaf.y, leaf.z, hx, hy, leaf.sz, shape_turn(leaf))
             if t is not None and (best_t is None or t < best_t): best, best_t = src, t
         return best
 
@@ -2579,7 +2893,7 @@ class TexMatrixDialog(QDialog):
         rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
         btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
         note = QLabel('Give a material one with its "Texture matrix" field in Objects > Materials (the material also needs a '
-                      'texture). The 3D preview doesn\'t draw textures, so you\'ll see the effect in BZFlag itself.')
+                      'texture). The 3D preview shows textures as small approximations and doesn\'t animate them, so you\'ll see the movement in BZFlag itself.')
         note.setWordWrap(True); col.addWidget(note); col.addStretch()
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
         col.addWidget(bb)
@@ -2653,12 +2967,15 @@ class MaterialsDialog(QDialog):
         btns = QHBoxLayout()
         add = QPushButton('Add / Update'); add.clicked.connect(s.save)
         rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
-        btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
-        note = QLabel('Material colors show in the 3D preview -- actual texture images are not drawn, so '
-                       'Load PNG fills in the color automatically from the image (if you haven\'t set one '
-                       'yourself), and Fetch Color from URL does the same for an internet texture.\n'
-                       'Every other material setting (addtexture, ambient...) is kept in the file '
-                       'but not drawn.\nFor a texture on the internet, paste its full URL (e.g. ' + s.APPROVED +
+        fetch_all = QPushButton('Fetch All URL Textures'); fetch_all.clicked.connect(s.fetch_all)
+        fetch_all.setToolTip('Internet textures load by themselves in the background; this tries again for any that failed (or loads them all if View > Load Remote Textures Automatically is off)')
+        btns.addWidget(add); btns.addWidget(rm); btns.addWidget(fetch_all); col.addLayout(btns)
+        note = QLabel('The 3D preview draws a tiny (16 pixel) version of a material\'s texture when it has the picture: a PNG with '
+                       'the texture\'s name beside the map (or in a textures folder there), one you Load PNG, or an internet texture, which '
+                       'loads by itself in the background (View > Load Remote Textures Automatically). Load PNG and Fetch Color also fill in '
+                       'the color from the image if you haven\'t set one yourself. Fetch All URL Textures retries any that failed.\n'
+                       'An addtexture line is read as the material\'s texture, the same as texture. Every other material setting (ambient...) '
+                       'is kept in the file but not drawn.\nFor a texture on the internet, paste its full URL (e.g. ' + s.APPROVED +
                        'someone/name.png). The game only loads http://, so a pasted https:// link is switched '
                        'to http:// automatically.')
         note.setWordWrap(True); col.addWidget(note)
@@ -2699,22 +3016,22 @@ class MaterialsDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(s, 'Load texture', s.folder or '', 'PNG images (*.png)')
         if not path: return
         base = os.path.splitext(os.path.basename(path))[0]
-        pix = QPixmap(path)
-        s.tex.setText(base); s.m.texcache[s.name.text() or base] = pix
+        img = QImage(path)
+        if img.isNull():
+            QMessageBox.warning(s, 'Load texture', "That file couldn't be read as an image."); return
+        s.tex.setText(base); s.m.texcache[base] = micro_texture(img)  # keyed by texture name, so it doesn't matter when you name the material
         if (s.r.value(), s.g.value(), s.b.value(), s.al.value()) == (1.0, 1.0, 1.0, 1.0):
-            r, g, b, a = average_color(pix.toImage())  # only fills in an untouched default color
+            r, g, b, a = average_color(img)  # only fills in an untouched default color
             s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
 
     def fetch_url_color(s):
-        """Explicit, one-off download -- this app makes no network calls on its own, so
-        fetching an image URL only ever happens when you click this button."""
+        """Download the image in the Texture field now and take its average color. (Textures a map already uses are
+        fetched in the background automatically; this is for the one you are typing, or when automatic loading is off.)"""
         url = s.tex.text().strip()
         if '://' not in url:
             QMessageBox.information(s, 'Fetch color', 'Paste a full image URL into the Texture field first.'); return
         try:
-            import urllib.request
-            req = urllib.request.Request(url, headers={'User-Agent': 'BZMapMaker'})
-            data = urllib.request.urlopen(req, timeout=6).read()
+            data = download_texture(url)
         except Exception as e:
             QMessageBox.warning(s, 'Fetch failed', "Couldn't download that image:\n%s" % e); return
         img = QImage()
@@ -2722,6 +3039,8 @@ class MaterialsDialog(QDialog):
             QMessageBox.warning(s, 'Fetch failed', "That didn't look like a valid image."); return
         r, g, b, a = average_color(img)
         s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
+        s.m.texcache[url] = micro_texture(img)  # the 3D preview can now draw it
+        s.m.changed.emit()
         s.texwarn.setText('Color fields set from the downloaded image -- click Add/Update to save it.')
 
     def save(s):
@@ -2732,8 +3051,30 @@ class MaterialsDialog(QDialog):
         if s.texmat.currentText() != '(none)': extra.append('texmat ' + s.texmat.currentText())
         mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()), extra)
         s.m.materials[name] = mat
+        if s.m.texcache.get(mat.texture, 0) is None: del s.m.texcache[mat.texture]  # not found before? look again now
         if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
         s.m.changed.emit()
+
+    def fetch_all(s):
+        """Download every internet texture the map's materials use, once, because you asked, so the 3D view can draw them."""
+        urls = sorted({m.texture for m in s.m.materials.values() if is_remote_texture(m.texture)
+                       and s.m.texcache.get(m.texture) is None and m.texture not in s.m._tex_pending})
+        if not urls:
+            QMessageBox.information(s, 'Fetch textures', 'Nothing to fetch: every internet texture in this map is loaded (or still loading in the background), or the map has none.'); return
+        ok, bad = 0, []  # textures are normally fetched automatically as you work; this retries the ones that failed (or all of them if automatic loading is off)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for url in urls:
+                try:
+                    data = download_texture(url)
+                    img = QImage()
+                    if not img.loadFromData(data): raise ValueError('not an image')
+                    s.m.texcache[url] = micro_texture(img); ok += 1
+                except Exception: bad.append(url.rsplit('/', 1)[-1] or url)
+        finally:
+            QApplication.restoreOverrideCursor()
+        s.m.changed.emit()
+        QMessageBox.information(s, 'Fetch textures', 'Loaded %d of %d.' % (ok, len(urls)) + ((' Could not get: ' + ', '.join(bad) + '.') if bad else ''))
 
     def remove(s):
         name = s.name.text().strip()
@@ -2969,6 +3310,13 @@ class Win(QMainWindow):
         show_z.setChecked(s.settings.value('showZones', 'true') != 'false')
         s.m.show_zones = show_z.isChecked()
         show_z.toggled.connect(s.toggle_show_zones); vw.addAction(show_z)
+        for label, key, attr in (('Edge Shading in 3D', 'edgeShading', 'edge_shading'), ('Show Textures in 3D', 'showTextures', 'show_textures')):
+            a = QAction(label, s); a.setCheckable(True); a.setChecked(s.settings.value(key, 'true') != 'false')
+            setattr(s.pv, attr, a.isChecked()); a.toggled.connect(lambda on, key=key, attr=attr: s.set_pv_option(key, attr, on)); vw.addAction(a)
+        rt = QAction('Load Remote Textures Automatically', s); rt.setCheckable(True)
+        rt.setToolTip('Download the http:// textures a map uses in the background so the 3D view can show them')
+        rt.setChecked(s.settings.value('remoteTextures', 'true') != 'false'); s.m.remote_textures = rt.isChecked()
+        rt.toggled.connect(s.set_remote_textures); vw.addAction(rt)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
         for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
@@ -3010,6 +3358,11 @@ class Win(QMainWindow):
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
         s.mat = QComboBox(); s.mat.setEditable(True); s.mat.currentTextChanged.connect(lambda t: s.edit('matref', t))
+        s.texsize = QLineEdit()
+        s.texsize.setToolTip('How big one texture tile is. Box, pyramid and arc: 4 numbers, cone: 2 numbers. A negative number is the tile size in '
+                             'world units, a positive one is relative to the object\'s size (1 1 1 1 = one texture per face). '
+                             'Leave blank for BZFlag\'s default (nothing is written to the map).')
+        s.texsize.editingFinished.connect(s.edit_texsize)
         s.phydrv_combo = QComboBox(); s.phydrv_combo.setEditable(True)
         s.phydrv_combo.currentTextChanged.connect(lambda t: s.edit('phydrv', t))
         s.flip = QCheckBox('Flip (point down)'); s.flip.toggled.connect(lambda v: s.edit('flipz', v))
@@ -3058,6 +3411,7 @@ class Win(QMainWindow):
         fl.addRow('Reload times', s.wdelay); fl.addRow('Fires flag', s.wtype)
         fl.addRow('Trigger', s.trigger); fl.addRow('Capturing team', s.eventteam)
         fl.addRow('Material (all faces)', s.mat)
+        fl.addRow('Texture size', s.texsize)
         s.face = {}
         for fk, fl_ in (('top', 'Top'), ('sides', 'Sides'), ('bottom', 'Bottom'), ('inside', 'Inside'),
                         ('outside', 'Outside'), ('startside', 'Start side'), ('endside', 'End side')):
@@ -3275,6 +3629,22 @@ class Win(QMainWindow):
         if not s.editing_member and k not in ('link', 'blink', 'lface', 'bface', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
+    def edit_texsize(s):
+        """Texture size field: blank, or exactly the 4 (box, pyramid, arc) / 2 (cone) numbers BZFlag reads; anything else is put back."""
+        o = s.current_obj()
+        if s.busy or not o or o.t not in ('arc', 'cone', 'box', 'pyramid'): return
+        want = 2 if o.t == 'cone' else 4
+        toks = s.texsize.text().replace(',', ' ').split()
+        try:
+            for t in toks: float(t)
+            ok = not toks or len(toks) == want
+        except ValueError: ok = False
+        if not ok:
+            s.m.warn.emit('Texture size needs %d numbers (or leave it blank for the default).' % want)
+            s.busy = True; s.texsize.setText(o.texsize); s.busy = False; return
+        new = ' '.join(toks)
+        if new != o.texsize: s.edit('texsize', new)
+
     def edit_face(s, k, v):
         o = s.current_obj()
         if s.busy or not o: return
@@ -3315,6 +3685,7 @@ class Win(QMainWindow):
                 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
+                'texsize': o and o.t in ('arc', 'cone', 'box', 'pyramid'),
                 'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'flip': o and o.t == 'pyramid',
                 'phys': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'zteam': o and o.t == 'zone',
                 'zsafety': o and o.t == 'zone', 'zflags': o and o.t == 'zone',
@@ -3329,7 +3700,7 @@ class Win(QMainWindow):
             widget = {'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'member_combo': s.member_combo,
-                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat,
+                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat, 'texsize': s.texsize,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
                       'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
                       'wcolor': s.wcolor, 'tilt': s.tilt, 'initdelay': s.initdelay, 'wdelay': s.wdelay,
@@ -3359,6 +3730,10 @@ class Win(QMainWindow):
             s.lfacec.setCurrentIndex(0 if o.lface == 'b' else 1); s.bfacec.setCurrentIndex(0 if o.bface == 'b' else 1)
             s.div.setValue(o.divisions); s.ang.setValue(o.angle if o.angle else 360); s.rat.setValue(o.ratio)
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
+            s.texsize.setText(o.texsize if o.t in ('arc', 'cone', 'box', 'pyramid') else '')
+            s.texsize.setPlaceholderText({'arc': '4 numbers, e.g. -2 -2 -8 -8 (blank = default)', 'cone': '2 numbers, e.g. -8 -8 (blank = default)',
+                                          'box': '4 numbers, e.g. 1 1 1 1 = one texture per face (blank = default)',
+                                          'pyramid': '4 numbers, e.g. 1 1 1 1 = one texture per face (blank = default)'}.get(o.t, ''))
             for fk, cb in s.face.items():
                 cur = o.mats.get(fk, '')
                 cb.clear(); cb.addItems([''] + sorted(set(s.m.materials) | ({cur} if cur else set())))
@@ -3455,6 +3830,19 @@ class Win(QMainWindow):
         if clicked is rm:
             gone = s.m.apply_cleanup(plan); s.statusBar().showMessage('Removed ' + s._removed_text(gone) + '.', 8000)
         return True
+
+    def set_pv_option(s, key, attr, on):
+        """A View-menu choice for the 3D view (edge shading, textures): apply it now and remember it."""
+        setattr(s.pv, attr, on); s.settings.setValue(key, 'true' if on else 'false'); s.pv.update()
+
+    def set_remote_textures(s, on):
+        """View > Load Remote Textures Automatically: remember the choice, and when it is turned on, start loading the
+        current map's internet textures (including ones that failed earlier, in case you were offline)."""
+        s.settings.setValue('remoteTextures', 'true' if on else 'false'); s.m.remote_textures = on
+        if on:
+            for k in [k for k, v in s.m.texcache.items() if v is None and is_remote_texture(k)]: del s.m.texcache[k]
+            s.m.prefetch_remote()
+        s.pv.update()
 
     def open_texmats(s):
         TexMatrixDialog(s.m).exec()
@@ -3608,15 +3996,19 @@ class Win(QMainWindow):
         s.m.reset.emit(); s.m.selected.emit(); s.m.changed.emit(); s.title()
 
     def load_textures(s, folder):
+        """Called after a map is opened or saved somewhere new: forget what was cached and load the textures
+        whose PNGs sit beside the map. (Others are looked for later, the first time they are drawn.)"""
         s.m.texcache = {}
+        s.m.prefetch_remote()
         if not folder: return
-        for name, mat in s.m.materials.items():
-            if mat.texture:
-                p = os.path.join(folder, mat.texture + '.png')
-                if os.path.isfile(p):
-                    pix = QPixmap(p); s.m.texcache[name] = pix
-                    if tuple(mat.color) == (1.0, 1.0, 1.0, 1.0):  # color untouched -> use the texture's own
-                        mat.color = average_color(pix.toImage())
+        for mat in s.m.materials.values():
+            p = s.m.texture_file(mat.texture)
+            if not p: continue
+            img = QImage(p)
+            if img.isNull(): continue
+            s.m.texcache[mat.texture] = micro_texture(img)  # only a tiny copy is kept, whatever the file's size
+            if tuple(mat.color) == (1.0, 1.0, 1.0, 1.0):  # color untouched -> use the texture's own
+                mat.color = average_color(img)
 
     def open_file(s, path=None):
         path = path or QFileDialog.getOpenFileName(s, 'Open world', '', 'BZFlag worlds (*.bzw);;All files (*)')[0]
