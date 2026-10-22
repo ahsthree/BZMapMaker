@@ -161,7 +161,7 @@ def texmatrix_block(t):
 
 
 def _texmat_names(mat):
-    """Texture matrices a material points at (its 'texmat <name>' lines)."""
+    """Texturematrix a material points at (its 'texmat <name>' lines)."""
     return [q[1] for q in (ln.split() for ln in (mat.raw or mat.extra)) if len(q) > 1 and q[0].lower() == 'texmat']
 
 
@@ -952,7 +952,7 @@ def library_text(name, category, description, objs, defines, materials, texmats=
     used = _materials_used(objs, defines)
     out = [lib_header(name, category, description), '# Made with BZ Map Maker', '']
     wanted = {t for mn in used if mn in materials for t in _texmat_names(materials[mn])}
-    for tn in sorted(wanted):  # a material's texture matrix has to be defined before it
+    for tn in sorted(wanted):  # a material's texturematrix has to be defined before it
         if tn in (texmats or {}): out += texmatrix_block(texmats[tn]) + ['']
     for mn in sorted(used):
         if mn in materials: out += material_block(materials[mn]) + ['']
@@ -1034,7 +1034,7 @@ class Model(QObject):
         s.materials, s.defines, s.texcache, s.extras = {}, {}, {}, []
         s.options_text = ''
         s.physics = {}
-        s.texmats = {}  # Objects -> Texture Matrices
+        s.texmats = {}  # Objects -> Texturematrix
         s.world = new_world()  # Objects -> World Settings
         s.lib_item = None  # the custom object the 'Custom object' tool places
         s.nid, s.sym = 1, 0
@@ -1078,7 +1078,7 @@ class Model(QObject):
 
     def cleanup_plan(s, everything=False):
         """What 'remove unused' would delete, as {'defines', 'materials', 'texmats', 'physics'} name lists.
-        Always: group prefabs nothing places, plus the materials, texture matrices and physics drivers
+        Always: group prefabs nothing places, plus the materials, texturematrix and physics drivers
         that only those prefabs used. With everything=True also anything else nothing uses at all (say, a
         material you made but haven't assigned yet). Anything an unrecognised block mentions by name is kept."""
         reach = s.reachable_defines(); dead = [n for n in s.defines if n not in reach]
@@ -1154,23 +1154,20 @@ class Model(QObject):
             s.fetch_remote(url)
 
     def _fetch_worker(s, url):
-        arr = avg = None
+        arr = None
         try:
             img = QImage()
             if img.loadFromData(download_texture(url)):  # QImage (unlike QPixmap) may be used off the main thread
-                arr, avg = micro_texture(img), average_color(img)
+                arr = micro_texture(img)
         except Exception: pass
-        s._tex_done.put((url, arr, avg)); s._tex_ready.emit()
+        s._tex_done.put((url, arr)); s._tex_ready.emit()
 
     def _collect_textures(s):
         got = False
         while True:
-            try: url, arr, avg = s._tex_done.get_nowait()
+            try: url, arr = s._tex_done.get_nowait()
             except queue.Empty: break
             s._tex_pending.discard(url); s.texcache[url] = arr; got = True
-            if arr is not None and avg is not None:
-                for mat in s.materials.values():
-                    if mat.texture == url and tuple(mat.color) == (1.0, 1.0, 1.0, 1.0): mat.color = avg  # as for local textures
         if got: s.changed.emit()
 
     def tele_names(s):
@@ -2940,21 +2937,6 @@ def _qpath(poly):
 # ---------------------------------------------------------------------------
 # Materials dialog
 # ---------------------------------------------------------------------------
-def average_color(img):
-    """Mean color of an image, scaled down first so this stays cheap regardless of the
-    source resolution. Used so a textured object shows roughly the right color in the 3D
-    view instead of plain white, since the view doesn't actually draw texture images."""
-    small = img.scaled(8, 8, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    small = small.convertToFormat(QImage.Format.Format_RGBA8888)
-    n = small.width() * small.height()
-    if not n: return (1.0, 1.0, 1.0, 1.0)
-    r = g = b = 0
-    for y in range(small.height()):
-        for x in range(small.width()):
-            c = small.pixelColor(x, y); r += c.red(); g += c.green(); b += c.blue()
-    return (r / n / 255, g / n / 255, b / n / 255, 1.0)
-
-
 class ObjectInfoDialog(QDialog):
     """Name, category and description for a new library object."""
 
@@ -3143,7 +3125,7 @@ def replace_all_text(doc, find, repl, flags, limit=200000):
 
 class CleanupDialog(QDialog):
     """Objects > Remove Unused: choose which leftovers to delete from the map."""
-    KINDS = (('defines', 'Group definition'), ('materials', 'Material'), ('texmats', 'Texture matrix'), ('physics', 'Physics driver'))
+    KINDS = (('defines', 'Group definition'), ('materials', 'Material'), ('texmats', 'Texturematrix'), ('physics', 'Physics driver'))
 
     def __init__(s, m):
         super().__init__(); s.m = m
@@ -3153,7 +3135,7 @@ class CleanupDialog(QDialog):
                          'Undo (Ctrl+Z) brings it back.'); s.intro.setWordWrap(True); lay.addWidget(s.intro)
         s.list = QListWidget(); lay.addWidget(s.list, 1)
         s.empty = QLabel('Nothing to remove.'); lay.addWidget(s.empty)
-        s.more = QCheckBox('Also list materials, texture matrices and physics drivers that nothing uses at all')
+        s.more = QCheckBox('Also list materials, texturematrix and physics drivers that nothing uses at all')
         s.more.toggled.connect(lambda _v: s.fill()); lay.addWidget(s.more)
         s.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         s.bb.button(QDialogButtonBox.StandardButton.Ok).setText('Remove Checked')
@@ -3178,8 +3160,8 @@ class CleanupDialog(QDialog):
 
 
 class TexMatrixDialog(QDialog):
-    """Objects > Texture Matrices: named matrices that make a material's texture shift, spin or
-    scale (fixed, or moving over time). A material uses one through its 'Texture matrix' field.
+    """Objects > Texturematrix: named matrices that make a material's texture shift, spin or
+    scale (fixed, or moving over time). A material uses one through its 'Texturematrix' field.
     Only the settings ticked here are written to the file."""
     # key, checkbox text, value prefixes, tooltip (from the BZFlag wiki's description of each parameter)
     ROWS = (('fixedshift', 'Fixed shift', ('u ', 'v '), 'Time-invariant shift: the texture doesn\'t move with time.'),
@@ -3193,7 +3175,7 @@ class TexMatrixDialog(QDialog):
 
     def __init__(s, m):
         super().__init__(); s.m, s.cur, s.cb, s.sp = m, None, {}, {}
-        s.setWindowTitle('Texture Matrices'); s.resize(620, 480)
+        s.setWindowTitle('Texturematrix'); s.resize(620, 480)
         root = QHBoxLayout(s)
         s.list = QListWidget(); s.list.addItems(sorted(m.texmats)); s.list.currentTextChanged.connect(s.pick)
         root.addWidget(s.list, 1)
@@ -3211,7 +3193,7 @@ class TexMatrixDialog(QDialog):
         add = QPushButton('Add / Update'); add.clicked.connect(s.save)
         rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
         btns.addWidget(add); btns.addWidget(rm); col.addLayout(btns)
-        note = QLabel('Give a material one with its "Texture matrix" field in Objects > Materials (the material also needs a '
+        note = QLabel('Give a material one with its "Texturematrix" field in Objects > Materials (the material also needs a '
                       'texture). The 3D preview shows textures as small approximations and doesn\'t animate them, so you\'ll see the movement in BZFlag itself.')
         note.setWordWrap(True); col.addWidget(note); col.addStretch()
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
@@ -3238,7 +3220,7 @@ class TexMatrixDialog(QDialog):
     def save(s):
         name = s.name.text().strip()
         if not name or any(c.isspace() for c in name):
-            QMessageBox.information(s, 'Texture matrix', 'Give it a name with no spaces, such as scroll_left.'); return
+            QMessageBox.information(s, 'Texturematrix', 'Give it a name with no spaces, such as scroll_left.'); return
         old = s.m.texmats.get(name); s.m.push()
         s.m.texmats[name] = TexMatrix(name, extra=list(old.extra) if old else [], **s.values())  # keep lines we don't edit
         if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
@@ -3248,7 +3230,7 @@ class TexMatrixDialog(QDialog):
         name = s.name.text().strip()
         if name not in s.m.texmats: return
         users = [m.name for m in s.m.materials.values() if name in _texmat_names(m)]
-        if users and QMessageBox.question(s, 'Remove texture matrix', '%s use%s "%s". Remove it anyway? (They keep pointing at it, '
+        if users and QMessageBox.question(s, 'Remove texturematrix', '%s use%s "%s". Remove it anyway? (They keep pointing at it, '
                 'and BZFlag will complain until you change them.)' % (', '.join(users), 's' if len(users) == 1 else '', name)) \
                 != QMessageBox.StandardButton.Yes: return
         s.m.push(); del s.m.texmats[name]
@@ -3271,15 +3253,14 @@ class MaterialsDialog(QDialog):
         s.tex.setPlaceholderText('local texture name (no .png), or paste a full http:// image URL')
         s.tex.textChanged.connect(s.check_tex)
         browse = QPushButton('Load PNG...'); browse.clicked.connect(s.browse)
-        fetch = QPushButton('Fetch Color from URL'); fetch.clicked.connect(s.fetch_url_color)
         rgb = QHBoxLayout(); s.r = QDoubleSpinBox(); s.g = QDoubleSpinBox(); s.b = QDoubleSpinBox(); s.al = QDoubleSpinBox()
         for sp in (s.r, s.g, s.b, s.al): sp.setRange(0, 1); sp.setSingleStep(.05); sp.setValue(1); rgb.addWidget(sp)
         form = QFormLayout(); form.addRow('Name', s.name)
-        trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse); trow.addWidget(fetch)
+        trow = QHBoxLayout(); trow.addWidget(s.tex); trow.addWidget(browse)
         form.addRow('Texture', trow)
         s.texmat = QComboBox(); s.fill_texmat('')
-        s.texmat.setToolTip('How the texture moves, spins or scales; define them in Objects > Texture Matrices')
-        form.addRow('Texture matrix', s.texmat); form.addRow('Color R G B A', rgb)
+        s.texmat.setToolTip('How the texture moves, spins or scales; define them in Objects > Texturematrix')
+        form.addRow('Texturematrix', s.texmat); form.addRow('Color R G B A', rgb)
         col.addLayout(form)
         s.texwarn = QLabel(); s.texwarn.setWordWrap(True); s.texwarn.setStyleSheet('color:#b5651d')
         col.addWidget(s.texwarn)
@@ -3291,8 +3272,8 @@ class MaterialsDialog(QDialog):
         btns.addWidget(add); btns.addWidget(rm); btns.addWidget(fetch_all); col.addLayout(btns)
         note = QLabel('The 3D preview draws a tiny (16 pixel) version of a material\'s texture when it has the picture: a PNG with '
                        'the texture\'s name beside the map (or in a textures folder there), one you Load PNG, or an internet texture, which '
-                       'loads by itself in the background (View > Load Remote Textures Automatically). Load PNG and Fetch Color also fill in '
-                       'the color from the image if you haven\'t set one yourself. Fetch All URL Textures retries any that failed.\n'
+                       'loads by itself in the background (View > Load Remote Textures Automatically). Fetch All URL Textures '
+                       'retries any that failed.\n'
                        'An addtexture line is read as the material\'s texture, the same as texture. Every other material setting (ambient...) '
                        'is kept in the file but not drawn.\nFor a texture on the internet, paste its full URL (e.g. ' + s.APPROVED +
                        'someone/name.png). The game only loads http://, so a pasted https:// link is switched '
@@ -3310,7 +3291,7 @@ class MaterialsDialog(QDialog):
             for sp, v in zip((s.r, s.g, s.b, s.al), s.cur.color): sp.setValue(v)
 
     def fill_texmat(s, current):
-        """The combo lists the map's texture matrices; one the material names but the map lacks is kept so it isn't lost."""
+        """The combo lists the map's texturematrix; one the material names but the map lacks is kept so it isn't lost."""
         names = sorted(set(s.m.texmats) | ({current} if current else set()))
         s.texmat.clear(); s.texmat.addItems(['(none)'] + names); s.texmat.setCurrentText(current or '(none)')
 
@@ -3339,28 +3320,6 @@ class MaterialsDialog(QDialog):
         if img.isNull():
             QMessageBox.warning(s, 'Load texture', "That file couldn't be read as an image."); return
         s.tex.setText(base); s.m.texcache[base] = micro_texture(img)  # keyed by texture name, so it doesn't matter when you name the material
-        if (s.r.value(), s.g.value(), s.b.value(), s.al.value()) == (1.0, 1.0, 1.0, 1.0):
-            r, g, b, a = average_color(img)  # only fills in an untouched default color
-            s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
-
-    def fetch_url_color(s):
-        """Download the image in the Texture field now and take its average color. (Textures a map already uses are
-        fetched in the background automatically; this is for the one you are typing, or when automatic loading is off.)"""
-        url = s.tex.text().strip()
-        if '://' not in url:
-            QMessageBox.information(s, 'Fetch color', 'Paste a full image URL into the Texture field first.'); return
-        try:
-            data = download_texture(url)
-        except Exception as e:
-            QMessageBox.warning(s, 'Fetch failed', "Couldn't download that image:\n%s" % e); return
-        img = QImage()
-        if not img.loadFromData(data):
-            QMessageBox.warning(s, 'Fetch failed', "That didn't look like a valid image."); return
-        r, g, b, a = average_color(img)
-        s.r.setValue(r); s.g.setValue(g); s.b.setValue(b); s.al.setValue(a)
-        s.m.texcache[url] = micro_texture(img)  # the 3D preview can now draw it
-        s.m.changed.emit()
-        s.texwarn.setText('Color fields set from the downloaded image -- click Add/Update to save it.')
 
     def save(s):
         name = s.name.text().strip()
@@ -3603,7 +3562,7 @@ class Win(QMainWindow):
         s.act(e, 'Group Selected (Ctrl+click or Shift+drag box to select)', s.do_group, 'Ctrl+G')
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
-        s.act(ob, 'Texture Matrices...', s.open_texmats)
+        s.act(ob, 'Texturematrix...', s.open_texmats)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
         s.lib_menu = ob.addMenu('Custom Objects'); s.lib_menu.aboutToShow.connect(s.fill_library_menu)
         s.act(ob, 'World Settings...', s.open_world)
@@ -4109,14 +4068,14 @@ class Win(QMainWindow):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
     def _removed_text(s, gone):
-        names = {'defines': 'group definition', 'materials': 'material', 'texmats': 'texture matrix', 'physics': 'physics driver'}
+        names = {'defines': 'group definition', 'materials': 'material', 'texmats': 'texturematrix', 'physics': 'physics driver'}
         parts = ['%d %s%s' % (len(v), names[k], '' if len(v) == 1 else ('es' if k == 'texmats' else 's')) for k, v in gone.items() if v]
         return ', '.join(parts)
 
     def open_cleanup(s):
         if not any(s.m.cleanup_plan(False).values()):
             if not any(s.m.cleanup_plan(True).values()):
-                QMessageBox.information(s, 'Remove Unused', 'Nothing unused: every group definition, material, texture matrix and '
+                QMessageBox.information(s, 'Remove Unused', 'Nothing unused: every group definition, material, texturematrix and '
                                         'physics driver in this map is in use.'); return
         dlg = CleanupDialog(s.m)
         if not dlg.exec(): return
@@ -4133,12 +4092,12 @@ class Win(QMainWindow):
         box = QMessageBox(s); box.setIcon(QMessageBox.Icon.Question); box.setWindowTitle('Unused groups')
         box.setText('This map has %d group definition%s that nothing places.' % (n, '' if n == 1 else 's'))
         extra = [t for t in (len(plan['materials']) and '%d material%s' % (len(plan['materials']), '' if len(plan['materials']) == 1 else 's'),
-                             len(plan['texmats']) and '%d texture matri%s' % (len(plan['texmats']), 'x' if len(plan['texmats']) == 1 else 'ces'),
+                             len(plan['texmats']) and '%d texturematrix' % len(plan['texmats']),
                              len(plan['physics']) and '%d physics driver%s' % (len(plan['physics']), '' if len(plan['physics']) == 1 else 's')) if t]
         box.setInformativeText('Remove %s%s before saving? They only take up space in the file, and Undo (Ctrl+Z) brings them back.'
                                % ('it' if n == 1 else 'them', (' along with ' + ', '.join(extra) + ' only they used') if extra else ''))
         box.setDetailedText('\n'.join(['Group definition: ' + x for x in plan['defines']] + ['Material: ' + x for x in plan['materials']] +
-                                       ['Texture matrix: ' + x for x in plan['texmats']] + ['Physics driver: ' + x for x in plan['physics']]))
+                                       ['Texturematrix: ' + x for x in plan['texmats']] + ['Physics driver: ' + x for x in plan['physics']]))
         rm = box.addButton('Remove and Save', QMessageBox.ButtonRole.AcceptRole)
         box.addButton('Save As Is', QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton(QMessageBox.StandardButton.Cancel)
@@ -4326,8 +4285,6 @@ class Win(QMainWindow):
             img = QImage(p)
             if img.isNull(): continue
             s.m.texcache[mat.texture] = micro_texture(img)  # only a tiny copy is kept, whatever the file's size
-            if tuple(mat.color) == (1.0, 1.0, 1.0, 1.0):  # color untouched -> use the texture's own
-                mat.color = average_color(img)
 
     def open_file(s, path=None):
         path = path or QFileDialog.getOpenFileName(s, 'Open world', '', 'BZFlag worlds (*.bzw);;All files (*)')[0]
