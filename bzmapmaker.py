@@ -6,7 +6,7 @@ Works on Windows, macOS and Linux. The 3D preview is drawn in software (QPainter
 OpenGL is required. Textures are applied to box faces with Qt's 2D projective quadToQuad
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
-import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, urllib.request
+import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, random, urllib.request
 
 __version__ = '1.4.9'
 import numpy as np
@@ -1136,7 +1136,10 @@ class Model(QObject):
                 if s.remote_textures: s.fetch_remote(texture)
                 return None
             p = s.texture_file(texture); img = QImage(p) if p else None
-            s.texcache[texture] = micro_texture(img) if img is not None and not img.isNull() else None
+            if img is not None and not img.isNull(): s.texcache[texture] = micro_texture(img)
+            else:  # no file beside the map: BZFlag's own textures (std_ground, wall, roof...) get a built-in stand-in
+                stem = os.path.splitext(os.path.basename(texture))[0].lower()
+                s.texcache[texture] = default_texture(stem) if stem in DEFAULT_TEX_DATA else None
         return s.texcache[texture]
 
     def fetch_remote(s, url):
@@ -1241,9 +1244,15 @@ class Model(QObject):
         (renamed if the map already has a different one of that name) and its prefabs are added
         once, so placing it again shares them. Returns the group, or None."""
         got = load_library_content(item.path)
+        if got and not got[0] and len(got[1]) == 1:  # a file that only defines a prefab and never places it: place one copy of it
+            got = ([Obj('group', 0, 0, 0, 1, 1, 1, 0, 0, next(iter(got[1])))],) + tuple(got[1:])
         if not got or not got[0]: return None
-        objs, defines, materials, texmats = got
-        slug = lib_slug(item.name); rename = {}; tmap = {}
+        return s.place_content(item.name, *got, x, y)
+
+    def place_content(s, name, objs, defines, materials, texmats, x, y):
+        """Add parsed objects to the map as one group instance called name at (x, y), bringing their materials, texturematrix
+        and prefabs along (see place_library). Used for library objects and for generated terrain. Returns the group."""
+        slug = lib_slug(name); rename = {}; tmap = {}
         for name, tm in texmats.items():
             have = s.texmats.get(name)
             if have is None: s.texmats[name] = tm; continue
@@ -2344,6 +2353,38 @@ DEFAULT_TEX_DATA = {
         'YlVLZFtRaF5VYVdOXVRKY1pPY1lPVU5FWVFIVU1FV05GW05EXlRJXVFGXVJGXFBFX1RJY1pSaW'
         'BWZ1xRYFRJZlxSaV9WWlNKWFBIWlBHXFFGWU1BYFRHZlpOZltPXlFEX1RIX1ZN'
     ),
+    'std_ground': (
+        'UXhQU3hSWHxXT3ZNWHtXU3hRUndRWHxXT3ZNV3pWVHpTUXdPWXxXUHZOVnpUVntUUnhQV3xVVn'
+        'tUUXhPWX1XU3hRVXxUVntVUXdPWX1YU3lSVHtTV3tWUXdPWX1XVHlTUnhRVXpTWXxYUHdPWXxY'
+        'VHlSVHlSWX1YUXdPWHxWVnpUU3hRWn1YUXdPV3tVV3tWUXhPVntVVXpTUHhPWHxXUnhQVXtTVX'
+        'pUUXhPWHxXUnlRVHpSVnpVUXhPWHxWU3lSU3dRVntVWHxXUXhPWX1YVHhTVXtTWXxXUXdPWHxX'
+        'VXlUVHpSWX1YUXdQWHxWVnpVUXhQVHhSWX1XT3ZMWXxXU3hRU3hRWX1YT3ZNV3tWVXpTUXdPWX'
+        '1YT3ZNVnpVVntVUnhQV31WVXpUUXhPWX1XU3hRVnxUVntUUXhPWX1XU3lSVXtTV3tVUXhPWX1X'
+        'VHlTUndQVXpTWXxXUXdPWXxXU3hSVHpSWXxYUHdPWHxWVXlUU3lRWX1YUXdPV3tVVntVUXhQVn'
+        'pUVntUUHdOWHxXUnhQVXpTVntVUHdOWHtXU3lRU3lSV3tVUXdPV3tWVHpSU3hRVnxUWHxWUXhP'
+        'WX1XVHlTVXtTWHxXUXdPWHxWVXpUVHpSWX1XUXdPWHxWVnpVUXhQVHlSWX1YT3ZNWXxYU3hRU3'
+        'hRWX1YT3ZNWHtXVXpTUndQWn1YT3ZNVnpVV3tVUXdQV3xWVXpTUXhPWH1XUnhQVnxUVXpUUXhP'
+        'WX1XU3hRVXtTVntVUXhPWX1XVHlSUnhRVntUWHxXUXdPWX1YVHhSVHpTWXxYUXdPWHxXVXpUU3'
+        'lSWn1YUXdPV3xWVnpVUXhPVXlTV3tVT3ZNWXxXUnhQVHlSV3tVUHZOWHtXVHlSUnhRWHtWUHdO'
+        'V3tVVXpTU3hRVntUV3xWUXhPWX1XVHlSVHtTWHxWUXhPWH1XVXpTVHpSWHxXUXhQWH1WVnpUUn'
+        'dQVHlTWX1YT3ZNWXxYU3hRU3lSWn1YT3ZNWHtWVXpUUnhQWn1YT3ZOV3tVV3tW'
+    ),
+    'wall': (
+        'a2FZY1dMYlZJal5UZFpSZVtTW1JKV05GXlNIVUk9WUxAZllNbGFVal5Ral9SYlhNbWNaZ1xQYF'
+        'VJZ1xSY1lPXFVNXlZNV05FWE1DWk1BWU1AZ1tPbmNYal1QbF9TZlxRamFXY1hNXVNIaF5UYlhN'
+        'YFlQYFhPW1JKW1FHXVBEW05BYlVKbmNYcGNXal5SZ11UZ15UY1tPYllOYFZLYVhNY1pQYVhQXl'
+        'VNWlBGW09DXE9CaVxSaF1RbF9Sal5SaF9WZlxRZVtRYVhOZFtRYVdMYVlNZVxUZFpSX1ZMXlJG'
+        'X1RJal5VZllNaV1QaFxQaF9VZlxRZFpQX1VMYlhOYFZLXVVLYllQYFZOXFJIYVZLYFZLaF1SXV'
+        'FFbGBVbmJWamBXaF9UZFpQYVhOY1pPYVlOXFRLYFdOYlhQW1FGZFpQVkxBZVpPZVhNbWFXbmJW'
+        'a2FYa2NZXlVLZl1TZVtRZV1SZ11UX1lQX1VNXVJHYVdMXFFGYldLZVhObWFXbmJXbWNaZl5VXl'
+        'ZNZl5TZVtSY1tRYlhOXVdPX1VNWE5DY1hNX1RKZVpPZlpQaFxRa2FXbWNbYVlRYllRamFXZFxT'
+        'YlpSYVhOX1VMX1VMXVJHY1hOYlZLZVlPYVVKY1ZKZFlPamFZZV1UZFpRaWBWZV5VYFhQXlZMX1'
+        'VMXlRLY1ZLZ1xRY1ZLY1ZMYlZJZVhNZFhOZl9XZl5WZFpSZl1TY1tSXVZNYFdOZFlRXFJJYlZM'
+        'ZVlPZFhMZllPY1ZLZlpOY1dNZ19XZ15WZlxTZFpQY1lQZV1VaWBXZ19WYVhOYVZNY1hNY1dLZl'
+        'pQY1dMZVhNZVlPaF5WX1ZNZFtRZFtQaV9VZV1UamBXZV1UX1VMZFpQY1lOYVVLZFdNYVVIZFdL'
+        'ZVlOZ15WZFxSZFpQZV1SaF9UaWBYaWBXYVlPYlhPZFpQZVtQZ1tQY1dNYlVLYVRIYVZKYVlQZV'
+        '5UZV1TZV1SaF9UZ19Wa2RdY1tSY1lQYlhOZFpPZVlPZVlPXlFHXlJIX1RIY1tT'
+    ),
 }
 _DEFAULT_TEX = {}
 
@@ -2609,7 +2650,7 @@ class Preview(QWidget):
 
     def face_color(s, o, face, default):
         """Color of one face: its own material, else the object's all-faces material, else default."""
-        name = o.mats.get(face) or o.matref
+        name = '' if o.t == 'base' else (o.mats.get(face) or o.matref)  # bzfs can't texture a base: it always shows its team's own textures
         if name in s.m.materials:
             c = s.m.materials[name].color
             col = QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255), int(c[3] * 255))
@@ -3393,6 +3434,364 @@ class RadarHost(QWidget):
         s.corner = c; s.do_layout()
 
 
+# ---------------------------------------------------------------------------
+# Terrain generator (Objects > Generate Terrain...)
+# ---------------------------------------------------------------------------
+# Builds a heightfield of hills and valleys on a flat plain, as one mesh like the Wings 3D example it was modelled on: a slab
+# whose top is the ground (BZFlag material 'flat-ground'), with the hills and valleys ('hill-mountain') rising or sinking from
+# it, and invisible ('clear') sides and bottom. Only symmetry the grid can repeat exactly is offered (no 120 degrees).
+TERRAIN_SYMS = [('Off', 'off', 1), ('2-team rotation (180\u00b0)', 'rot', 2), ('4-team rotation (90\u00b0)', 'rot', 4),
+                ('Mirror left-right', 'mirror_lr', 2), ('Mirror top-bottom', 'mirror_tb', 2)]
+TERRAIN_SIZES = {'Small': (0.12, 0.20), 'Medium': (0.18, 0.30), 'Large': (0.25, 0.40)}  # a hill's short radius, as a part of the world half-width
+TERRAIN_TILE = 20.0  # world units that one picture of a texture covers on the generated mesh
+TERRAIN_MIN_THICKNESS = 6.0  # the slab is never thinner than this under the deepest valley
+
+
+@dataclass
+class TerrainParams:
+    half: float = 200.0       # world half-width: the terrain covers the whole world
+    cell: float = 20.0        # size of one grid cell; smaller is finer but makes a bigger mesh
+    flat_pct: float = 70.0    # percent of the world (cells) left as flat ground
+    sym: int = 1              # index into TERRAIN_SYMS
+    valley_pct: float = 20.0  # percent of the hills and valleys that are valleys
+    size: str = 'Medium'      # key of TERRAIN_SIZES
+    max_tiers: int = 3        # tallest hill, in tiers
+    tier: float = 15.0        # height of one tier
+    terraced: bool = True     # stepped hills with flat landings (like the example) instead of one straight slope
+    landing: float = 10.0     # width of the flat landing between two tiers
+    slope: float = 45.0       # steepest slope in degrees (BZFlag tanks climb about 45 with -set _noClimb 0)
+    flat_z: float = 50.0      # height of the flat ground
+    seed: int = 1
+    margin: int = 2           # cells at the map edge that stay flat
+    clear: list = field(default_factory=list)  # [(x, y, radius)] areas that must stay flat (around bases and other objects)
+    flat_mat: str = 'flat-ground'; hill_mat: str = 'hill-mountain'
+
+
+def _dilate3(m):
+    out = m.copy(); out[1:, :] |= m[:-1, :]; out[:-1, :] |= m[1:, :]
+    o2 = out.copy(); o2[:, 1:] |= out[:, :-1]; o2[:, :-1] |= out[:, 1:]
+    return o2
+
+
+def _cells_touching(node_mask):
+    """Grid cells that have at least one corner in node_mask."""
+    return node_mask[:-1, :-1] | node_mask[1:, :-1] | node_mask[:-1, 1:] | node_mask[1:, 1:]
+
+
+def _inset(U, V, a, b):
+    """How far inside the ellipse with semi-axes a, b (in its own frame) each point (U, V) lies, measured as the amount both axes
+    must shrink for the point to be on the edge (0 outside it). That is a distance from the edge, up to a few percent."""
+    inside0 = (U / a) ** 2 + (V / b) ** 2 < 1.0
+    lo = np.zeros_like(U); hi = np.full_like(U, max(0.0, min(a, b) - 1e-3))
+    for _ in range(9):
+        mid = (lo + hi) * 0.5
+        inside = (U / (a - mid)) ** 2 + (V / (b - mid)) ** 2 < 1.0
+        lo = np.where(inside, mid, lo); hi = np.where(inside, hi, mid)
+    return np.where(inside0, lo, 0.0)
+
+
+def _design_tan(p):
+    """Slope the hills are built with: a little under the cap, since triangles on a grid come out slightly steeper than the ideal ramp."""
+    return math.tan(math.radians(max(5.0, min(85.0, p.slope)))) / 1.1
+
+
+def _feature_field(p, X, Y, cx, cy, ang, a, b, tiers):
+    """Height (above the flat ground, not yet signed) of one hill whose foot is the ellipse a x b, on the grid X, Y.
+    Every slope is about p.slope at most. Only the part of the grid around the hill is worked out."""
+    t = _design_tan(p)
+    H = np.zeros_like(X)
+    reach = max(a, b) + 1.0
+    sel = (np.abs(X - cx) <= reach) & (np.abs(Y - cy) <= reach)
+    if not sel.any(): return H
+    rows = np.where(sel.any(axis=1))[0]; cols = np.where(sel.any(axis=0))[0]
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    xs, ys = X[r0:r1, c0:c1], Y[r0:r1, c0:c1]
+    th = math.radians(ang); c, s = math.cos(th), math.sin(th)
+    U = (xs - cx) * c + (ys - cy) * s; V = -(xs - cx) * s + (ys - cy) * c
+    if p.terraced:
+        run = p.tier / t; sub = np.zeros_like(U)
+        for k in range(tiers):
+            off = k * (run + p.landing)
+            sub += p.tier * np.clip(_inset(U, V, a - off, b - off) / run, 0.0, 1.0)
+    else:
+        total = tiers * p.tier
+        sub = total * np.clip(_inset(U, V, a, b) * t / total, 0.0, 1.0)
+    H[r0:r1, c0:c1] = sub
+    return H
+
+
+def _max_tiers_for(p, a):
+    """How many tiers a hill with short radius a has room for (0 if it is too small even for one)."""
+    t = _design_tan(p)
+    if p.terraced:
+        run = p.tier / t
+        return int(math.floor((a - run - 6.0) / (run + p.landing))) + 1 if a >= run + 6.0 else 0
+    return int(math.floor((a - 6.0) * t / p.tier))
+
+
+def limit_slopes(H, cell, tan_cap, xs, iterations=60):
+    """Lower hill tops (raise valley floors) until no triangle of the mesh is steeper than tan_cap. Flat ground is never touched. The
+    grid is cut into triangles exactly as terrain_mesh does, and every step treats mirrored triangles alike, so symmetry is kept."""
+    n = H.shape[0] - 1
+    cx = (xs[:-1] + xs[1:]) * 0.5
+    up = (cx[None, :] * cx[:, None]) > 0   # up[j, i]: the cell's diagonal runs p00-p11
+    c = cell
+    for _ in range(iterations):
+        h00, h10, h11, h01 = H[:-1, :-1], H[:-1, 1:], H[1:, 1:], H[1:, :-1]
+        t1x = np.where(up, (h10 - h00) / c, (h10 - h00) / c); t1y = np.where(up, (h11 - h10) / c, (h01 - h00) / c)
+        t2x = np.where(up, (h11 - h01) / c, (h11 - h01) / c); t2y = np.where(up, (h01 - h00) / c, (h11 - h10) / c)
+        s1, s2 = np.hypot(t1x, t1y), np.hypot(t2x, t2y)
+        if max(s1.max(), s2.max()) <= tan_cap * 1.0005: break
+        red = np.zeros_like(H)
+        # triangle corner sets per cell: (T1: p00 p10 p11 | p00 p10 p01), (T2: p00 p11 p01 | p10 p11 p01); offsets are (dj, di)
+        for sel_up, sel_dn, s_ in ((((0, 0), (0, 1), (1, 1)), ((0, 0), (0, 1), (1, 0)), s1), (((0, 0), (1, 1), (1, 0)), ((0, 1), (1, 1), (1, 0)), s2)):
+            over = np.maximum(s_ - tan_cap, 0.0) * c * 0.5
+            for pick, mask in ((sel_up, up), (sel_dn, ~up)):
+                vals = [H[dj:dj + n, di:di + n] for (dj, di) in pick]
+                big = np.maximum.reduce([np.abs(v) for v in vals])
+                for (dj, di), v in zip(pick, vals):
+                    take = np.where(mask & (np.abs(v) >= big - 1e-9) & (over > 0) & (np.abs(v) > 1e-9), over, 0.0)
+                    np.maximum(red[dj:dj + n, di:di + n], take, out=red[dj:dj + n, di:di + n])
+        H = np.sign(H) * np.maximum(np.abs(H) - red, 0.0)
+    return H
+
+
+def terrain_heights(p, attempts=300):
+    """Place hills and valleys until about p.flat_pct of the cells are flat. Returns (H, info): H is the (n+1) x (n+1) grid of
+    heights above the flat ground, info has 'n', 'cell', 'prot' (nodes kept flat), 'flat_pct' (what was reached) and 'features'."""
+    n = max(4, int(round(2 * p.half / p.cell))); n += n % 2   # an even count keeps the grid symmetric about the centre
+    cell = 2.0 * p.half / n
+    xs = np.linspace(-p.half, p.half, n + 1); X, Y = np.meshgrid(xs, xs)
+    _label, mode, fold = TERRAIN_SYMS[max(0, min(len(TERRAIN_SYMS) - 1, p.sym))]
+    rng = random.Random(p.seed)
+    copy = lambda cx, cy, ang: [_xform(k, cx, cy, ang, mode, fold) for k in range(fold)]
+    prot = (np.abs(X) > p.half - p.margin * cell + 1e-6) | (np.abs(Y) > p.half - p.margin * cell + 1e-6)
+    for (x, y, r) in p.clear:
+        for (cx, cy, _a) in copy(x, y, 0.0): prot |= (X - cx) ** 2 + (Y - cy) ** 2 <= r * r
+    prot_cells = _cells_touching(prot)
+    H = np.zeros_like(X); occupied = np.zeros((n, n), bool); feats = []
+    total = float(n * n); want = (100.0 - p.flat_pct) / 100.0 * total
+    lo, hi = TERRAIN_SIZES.get(p.size, TERRAIN_SIZES['Medium'])
+    valley_tiers = int(math.floor((p.flat_z - TERRAIN_MIN_THICKNESS) / max(1.0, p.tier)))
+    tries = 0; tol = max(3.0, 0.012 * total); fails = 0   # tol: how far from the flat share we are happy to land
+    blocked = _dilate3(occupied) | prot_cells
+    while occupied.sum() < want - tol and tries < attempts:
+        tries += 1
+        if fails > 140: break   # nothing more fits
+        relax = fails > 60   # nothing fits easily any more: allow bigger features that may touch each other
+        remaining = want - occupied.sum()
+        a = rng.uniform(lo, hi) * p.half * (1.4 if relax else 1.0); b = a * rng.uniform(1.0, 2.2)
+        valley = rng.random() < p.valley_pct / 100.0 and valley_tiers >= 1
+        cx, cy, ang = rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(0, 180)
+        placed = None
+        for _shrink in range(9):   # try the hill, then smaller ones, until it fits the room left in the flat-ground budget
+            room = _max_tiers_for(p, a)
+            reach = p.half - p.margin * cell - a
+            if room < 1 or reach <= 0: break
+            K = rng.randint(1, min(p.max_tiers, room, valley_tiers if valley else p.max_tiers))
+            ox, oy = cx * reach, cy * reach
+            F = np.maximum.reduce([_feature_field(p, X, Y, x, y, r, a, b, K) for (x, y, r) in copy(ox, oy, ang)])
+            mask = F > 1e-6
+            cells = _cells_touching(mask)
+            if not (mask & prot).any() and not (cells & ((occupied | prot_cells) if relax else blocked)).any():
+                if (cells & ~occupied).sum() <= remaining + tol: placed = (F, cells, (ox, oy, a, b, K)); break
+            a *= 0.85; b *= 0.85
+        if placed is None: fails += 1; continue
+        fails = 0
+        F, cells, f = placed
+        # a feature that touches an earlier one of the same kind just joins it (the taller of the two wins); one of the other kind is skipped
+        new_h = np.where(F > 1e-6, (-F if valley else F), 0.0)
+        if (np.sign(H) * np.sign(new_h) < 0).any(): fails += 1; continue
+        H = np.where(np.abs(new_h) > np.abs(H), new_h, H); occupied |= cells; blocked = _dilate3(occupied) | prot_cells
+        feats.append(f + (-1 if valley else 1,))
+    H = limit_slopes(H, cell, math.tan(math.radians(max(5.0, min(85.0, p.slope)))), xs)
+    hi_, lo_ = np.maximum.reduce([H[:-1, :-1], H[1:, :-1], H[:-1, 1:], H[1:, 1:]]), np.minimum.reduce([H[:-1, :-1], H[1:, :-1], H[:-1, 1:], H[1:, 1:]])
+    flat_pct = 100.0 * float(((hi_ == 0) & (lo_ == 0)).sum()) / total
+    return H, {'n': n, 'cell': cell, 'prot': prot, 'flat_pct': flat_pct, 'features': feats}
+
+
+def terrain_mesh(p, H):
+    """The mesh of heights H: (vertices, normals, texcoords, faces, stats). faces are (material, (a, b, c), uv or None) with
+    counter-clockwise winding seen from outside, as BZFlag wants."""
+    n = H.shape[0] - 1; cell = 2.0 * p.half / n
+    xs = np.linspace(-p.half, p.half, n + 1)
+    V = [(float(xs[i]), float(xs[j]), float(p.flat_z + H[j, i])) for j in range(n + 1) for i in range(n + 1)]
+    idx = lambda i, j: j * (n + 1) + i
+    S = p.half
+    base = len(V); V += [(-S, -S, 0.0), (S, -S, 0.0), (S, S, 0.0), (-S, S, 0.0)]
+    B00, B10, B11, B01 = base, base + 1, base + 2, base + 3
+    tris = []   # (material, (a, b, c))
+    flat = lambda *ids: all(abs(V[v][2] - p.flat_z) < 1e-6 for v in ids)
+    for j in range(n):
+        for i in range(n):
+            p00, p10, p11, p01 = idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)
+            diag_up = (xs[i] + xs[i + 1]) * (xs[j] + xs[j + 1]) > 0   # which diagonal splits the cell; chosen so every symmetry maps cells onto cells
+            for t in (((p00, p10, p11), (p00, p11, p01)) if diag_up else ((p00, p10, p01), (p10, p11, p01))):
+                tris.append((p.flat_mat if flat(*t) else p.hill_mat, t))
+    def cross(t):
+        a, b, c = (V[k] for k in t)
+        u = (b[0] - a[0], b[1] - a[1], b[2] - a[2]); w = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+        return (u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0])
+    def outward(t, hint):
+        c = cross(t)
+        return t if c[0] * hint[0] + c[1] * hint[1] + c[2] * hint[2] > 0 else (t[0], t[2], t[1])
+    clear = []
+    def wall(tops, a, b, hint):   # a vertical side of the slab: a fan from the bottom corner a up to the top edge
+        clear.append(outward((a, b, tops[-1]), hint))
+        for k in range(len(tops) - 1, 0, -1): clear.append(outward((a, tops[k], tops[k - 1]), hint))
+    wall([idx(i, 0) for i in range(n + 1)], B00, B10, (0, -1, 0))
+    wall([idx(n, j) for j in range(n + 1)], B10, B11, (1, 0, 0))
+    wall([idx(i, n) for i in range(n + 1)], B01, B11, (0, 1, 0))
+    wall([idx(0, j) for j in range(n + 1)], B00, B01, (-1, 0, 0))
+    clear.append(outward((B00, B10, B11), (0, 0, -1))); clear.append(outward((B00, B11, B01), (0, 0, -1)))
+    normals, texcoords, faces = [], [], []
+    def normal_of(t):
+        c = cross(t); m = math.sqrt(c[0] ** 2 + c[1] ** 2 + c[2] ** 2) or 1.0
+        normals.append((c[0] / m, c[1] / m, c[2] / m)); return len(normals) - 1, normals[-1]
+    for t in clear: faces.append(('clear', t, normal_of(t)[0], None))
+    steepest = 0.0
+    for mat, t in tris:
+        ni, nv = normal_of(t)
+        steepest = max(steepest, math.degrees(math.acos(max(-1.0, min(1.0, abs(nv[2]))))))
+        uv = []
+        for v in t:
+            x, y, z = V[v]
+            if abs(nv[2]) >= 0.7: u_, v_ = x / TERRAIN_TILE, y / TERRAIN_TILE
+            elif abs(nv[0]) > abs(nv[1]): u_, v_ = y / TERRAIN_TILE, z / TERRAIN_TILE
+            else: u_, v_ = x / TERRAIN_TILE, z / TERRAIN_TILE
+            texcoords.append((u_, v_)); uv.append(len(texcoords) - 1)
+        faces.append((mat, t, ni, tuple(uv)))
+    stats = {'faces': len(faces), 'vertices': len(V), 'steepest': steepest}
+    return V, normals, texcoords, faces, stats
+
+
+def terrain_bzw(p, H, seed_note=True):
+    """BZW text for the terrain: its three materials (only the ones that are the example's own names are defined here) and the mesh."""
+    V, normals, texcoords, faces, stats = terrain_mesh(p, H)
+    ln = []
+    if seed_note: ln.append('# Terrain made by BZ Map Maker %s (seed %d, %d%% flat)' % (__version__, p.seed, round(p.flat_pct)))
+    ln += ['material', '  name clear', '  diffuse 0 0 0 0', '  noradar', '  nolighting', '  nosorting', '  noculling', 'end', '']
+    if p.flat_mat == 'flat-ground': ln += ['material', '  name flat-ground', '  texture std_ground', 'end', '']
+    if p.hill_mat == 'hill-mountain': ln += ['material', '  name hill-mountain', '  texture wall', 'end', '']
+    z = min(2.0, p.flat_z / 2.0); q = p.half / 2.0
+    ln += ['mesh', '  name terrain']
+    ln += ['  inside %s %s %s' % (num(x), num(y), num(z)) for x, y in ((0, 0), (q, q), (-q, -q), (-q, q), (q, -q))]
+    ln += ['  vertex %.4f %.4f %.4f' % v for v in V]
+    ln += ['  normal %.4f %.4f %.4f' % v for v in normals]
+    ln += ['  texcoord %.4f %.4f' % v for v in texcoords]
+    cur = None
+    for mat, t, ni, uv in faces:
+        if mat != cur: ln.append('  matref %s' % mat); cur = mat
+        ln += ['  face', '    vertices %d %d %d' % t, '    normals %d %d %d' % (ni, ni, ni)]
+        if uv: ln.append('    texcoords %d %d %d' % uv)
+        ln.append('  endface')
+    ln += ['end', '']
+    return '\n'.join(ln)
+
+
+def terrain_preview(p, H, info, px=360):
+    """A top-down picture of the terrain as an (h, w, 3) uint8 array: green flat ground, tan to white hills, blue valleys,
+    and a red tint over ground that is kept flat. North is up."""
+    n = info['n']
+    cellh = np.maximum(np.maximum(H[:-1, :-1], H[1:, :-1]), np.maximum(H[:-1, 1:], H[1:, 1:]))
+    cellv = np.minimum(np.minimum(H[:-1, :-1], H[1:, :-1]), np.minimum(H[:-1, 1:], H[1:, 1:]))
+    top = max(1.0, p.max_tiers * p.tier)
+    img = np.zeros((n, n, 3), float); img[:] = (112, 172, 102)
+    hill = cellh > 1e-6; val = cellv < -1e-6
+    f = np.clip(cellh / top, 0, 1)[..., None]
+    img = np.where(hill[..., None], (196, 170, 104) * (1 - f) + np.array((238, 238, 238)) * f, img)
+    g = np.clip(-cellv / top, 0, 1)[..., None]
+    img = np.where(val[..., None], (96, 148, 204) * (1 - g) + np.array((38, 72, 150)) * g, img)
+    pc = _cells_touching(info['prot']) & ~hill & ~val
+    img = np.where(pc[..., None], img * 0.78 + np.array((230, 90, 80)) * 0.22, img)
+    img = img[::-1]   # row 0 of the grid is the south edge
+    k = max(1, px // n)
+    return np.ascontiguousarray(np.kron(img, np.ones((k, k, 1)))).astype(np.uint8)
+
+
+class TerrainDialog(QDialog):
+    """Objects > Generate Terrain: sets how much of the world stays flat, the symmetry and the shape of the hills, shows a top view,
+    and on OK leaves BZW text for the terrain in .text."""
+
+    def __init__(s, parent, half, clear, sym_index, materials):
+        super().__init__(parent); s.setWindowTitle('Generate Terrain'); s.text = ''
+        s.p = TerrainParams(half=float(half), clear=list(clear), cell=20.0 if half <= 300 else 30.0)
+        s.p.seed = int(time.time()) % 100000; s.H = None; s.info = None
+        lay = QHBoxLayout(s); left = QVBoxLayout(); lay.addLayout(left); right = QVBoxLayout(); lay.addLayout(right)
+        form = QFormLayout(); left.addLayout(form)
+        def spin(lo, hi, val, step=1, dec=0, tip=''):
+            w = QDoubleSpinBox() if dec else QSpinBox(); w.setRange(lo, hi); w.setValue(val); w.setSingleStep(step)
+            if dec: w.setDecimals(dec)
+            w.setToolTip(tip); w.valueChanged.connect(s.schedule); return w
+        s.sym = QComboBox(); s.sym.addItems([t[0] for t in TERRAIN_SYMS]); s.sym.setCurrentIndex(sym_index); s.sym.currentIndexChanged.connect(s.schedule)
+        form.addRow('Symmetry', s.sym)
+        s.flat = spin(10, 95, 70, tip='Percent of the world left as flat ground (the rest is hills and valleys).'); form.addRow('Flat ground (%)', s.flat)
+        s.valley = spin(0, 100, 20, tip='Percent of the hills and valleys that are valleys.'); form.addRow('Valleys (% of features)', s.valley)
+        s.size = QComboBox(); s.size.addItems(list(TERRAIN_SIZES)); s.size.setCurrentText('Medium'); s.size.currentIndexChanged.connect(s.schedule)
+        form.addRow('Feature size', s.size)
+        s.tiers = spin(1, 5, 3, tip='Tallest hill, in tiers. A small hill gets fewer tiers if it has no room.'); form.addRow('Tallest hill (tiers)', s.tiers)
+        s.tier = spin(5, 40, 15, 1, tip='Height of one tier.'); form.addRow('Tier height', s.tier)
+        s.terr = QCheckBox('Stepped hills with flat landings'); s.terr.setChecked(True); s.terr.toggled.connect(s.schedule); form.addRow('', s.terr)
+        s.land = spin(4, 40, 10, 1, tip='Width of the flat landing between two tiers.'); form.addRow('Landing width', s.land)
+        s.slope = spin(15, 80, 45, 1, tip='Steepest slope. Steeper slopes make taller hills fit in less space.'); form.addRow('Steepest slope (\u00b0)', s.slope)
+        s.fz = spin(10, 500, 50, 5, tip='Height of the flat ground. Put bases and other objects at this height.'); form.addRow('Ground height (z)', s.fz)
+        s.cell = spin(8, 60, int(s.p.cell), 1, tip='Size of one grid cell. Smaller makes finer terrain and a much bigger mesh.'); form.addRow('Cell size', s.cell)
+        s.keep = QCheckBox('Keep ground flat around existing objects'); s.keep.setChecked(bool(clear)); s.keep.setEnabled(bool(clear)); s.keep.toggled.connect(s.schedule)
+        form.addRow('', s.keep)
+        s.fmat = QComboBox(); s.fmat.setEditable(True); s.fmat.addItems(sorted(set(materials) | {'flat-ground'})); s.fmat.setCurrentText('flat-ground')
+        s.hmat = QComboBox(); s.hmat.setEditable(True); s.hmat.addItems(sorted(set(materials) | {'hill-mountain'})); s.hmat.setCurrentText('hill-mountain')
+        form.addRow('Flat ground material', s.fmat); form.addRow('Hill material', s.hmat)
+        s.seed = QSpinBox(); s.seed.setRange(0, 999999); s.seed.setValue(s.p.seed); s.seed.valueChanged.connect(s.schedule)
+        newseed = QPushButton('New seed'); newseed.clicked.connect(s.new_seed)
+        row = QHBoxLayout(); row.addWidget(s.seed); row.addWidget(newseed); form.addRow('Random seed', row)
+        s.pic = QLabel(); s.pic.setMinimumSize(360, 360); right.addWidget(s.pic)
+        s.stats = QLabel(); s.stats.setWordWrap(True); s.stats.setMinimumWidth(360); right.addWidget(s.stats)
+        note = QLabel('Tanks drive only on flat ground unless the server is started with  -set _noClimb 0  , which lets them climb slopes of '
+                      'about 45\u00b0. Red tint: ground kept flat. The ground is at the height set here, so put bases and other objects at that z.')
+        note.setWordWrap(True); note.setMinimumWidth(360); right.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText('Add to Map')
+        bb.accepted.connect(s.accept_terrain); bb.rejected.connect(s.reject); right.addWidget(bb)
+        s.timer = QTimer(s); s.timer.setSingleShot(True); s.timer.setInterval(180); s.timer.timeout.connect(s.refresh)
+        s.refresh()
+
+    def schedule(s, *_): s.timer.start()
+
+    def new_seed(s): s.seed.setValue((s.seed.value() * 7919 + 104729) % 1000000)
+
+    def read(s):
+        p = s.p
+        p.sym = s.sym.currentIndex(); p.flat_pct = float(s.flat.value()); p.valley_pct = float(s.valley.value()); p.size = s.size.currentText()
+        p.max_tiers = int(s.tiers.value()); p.tier = float(s.tier.value()); p.terraced = s.terr.isChecked(); p.landing = float(s.land.value())
+        p.slope = float(s.slope.value()); p.flat_z = float(s.fz.value()); p.cell = float(s.cell.value()); p.seed = int(s.seed.value())
+        p.flat_mat = s.fmat.currentText().strip() or 'flat-ground'; p.hill_mat = s.hmat.currentText().strip() or 'hill-mountain'
+        s.land.setEnabled(p.terraced)
+        return p
+
+    def refresh(s):
+        p = s.read(); full = s.p.clear
+        run_p = replace(p, clear=full if s.keep.isChecked() else [])
+        try:
+            H, info = terrain_heights(run_p); V, normals, texcoords, faces, st = terrain_mesh(run_p, H)
+        except Exception as e:
+            s.stats.setText('Could not make terrain with these settings: %s' % e); s.H = None; return
+        s.H, s.info, s.run_p = H, info, run_p
+        rgb = terrain_preview(run_p, H, info)
+        h, w = rgb.shape[:2]; s._buf = rgb.tobytes()
+        img = QImage(s._buf, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+        s.pic.setPixmap(QPixmap.fromImage(img).scaled(360, 360, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
+        msg = ('Flat ground: %.0f%% (asked for %.0f%%). %d hills and valleys. Steepest slope %.0f\u00b0. Mesh: %d faces.'
+               % (info['flat_pct'], p.flat_pct, len(info['features']), st['steepest'], st['faces']))
+        if abs(info['flat_pct'] - p.flat_pct) > 6: msg += ' The flat share could not be reached: too little room, so try smaller hills or fewer protected areas.'
+        if st['faces'] > 8000: msg += ' That is a big mesh; a larger cell size makes it lighter.'
+        s.stats.setText(msg)
+
+    def accept_terrain(s):
+        s.timer.stop(); s.refresh()
+        if s.H is None: return
+        s.text = terrain_bzw(s.run_p, s.H); s.accept()
+
+
 class WorldDialog(QDialog):
     """The map's single 'world' block (see wiki.bzflag.org/World_(object)): name, size,
     flagHeight, noWalls and freeCtfSpawns. Size is the same value as the toolbar's world-size box."""
@@ -3565,6 +3964,7 @@ class Win(QMainWindow):
         s.act(ob, 'Texturematrix...', s.open_texmats)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
         s.lib_menu = ob.addMenu('Custom Objects'); s.lib_menu.aboutToShow.connect(s.fill_library_menu)
+        s.act(ob, 'Generate Terrain...', s.generate_terrain)
         s.act(ob, 'World Settings...', s.open_world)
         s.act(ob, 'Map Options...', s.open_options)
         s.act(ob, 'Physics Drivers...', s.open_physics)
@@ -4159,6 +4559,25 @@ class Win(QMainWindow):
         s.lib_action.setText('Place: ' + item.name); s.lib_action.setEnabled(True); s.lib_action.setChecked(True)
         s.statusBar().showMessage(HINT['library'], 8000)
 
+    def generate_terrain(s):
+        """Objects > Generate Terrain: random hills and valleys over the whole world, flat in the places you choose, symmetric if asked."""
+        clear = []
+        for leaf, _src in expand(s.m):   # keep the ground flat under what is already on the map
+            if leaf.t in ('zone', 'weapon', 'mesh', 'group', 'link'): continue
+            clear.append((leaf.x, leaf.y, math.hypot(leaf.sx, leaf.sy) + 25.0))
+        idx = {0: 0, 1: 1, 2: 1, 3: 2, 4: 3, 5: 4}.get(s.m.sym, 0)   # the toolbar's mode, as far as terrain can repeat it (no 120 degrees)
+        dlg = TerrainDialog(s, s.m.W, clear, idx, sorted(s.m.materials))
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.text: return
+        try:
+            _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(dlg.text)
+        except Exception as e:
+            QMessageBox.warning(s, 'Generate Terrain', 'The terrain could not be added: %s' % e); return
+        s.m.push()
+        g = s.m.place_content('terrain', objs, defines, materials, texmats, 0, 0)
+        s.m.select(g); s.m.changed.emit()
+        s.statusBar().showMessage('Terrain added. The ground is at z = %g: put bases and other objects at that height. '
+                                  'Tanks need -set _noClimb 0 to climb the slopes.' % dlg.run_p.flat_z, 20000)
+
     def open_library(s):
         LibraryDialog(s).exec()
 
@@ -4273,10 +4692,15 @@ class Win(QMainWindow):
         s.m.push(); s.m.__init__(); s.m.path = None
         s.m.reset.emit(); s.m.selected.emit(); s.m.changed.emit(); s.title()
 
-    def load_textures(s, folder):
-        """Called after a map is opened or saved somewhere new: forget what was cached and load the textures
-        whose PNGs sit beside the map. (Others are looked for later, the first time they are drawn.)"""
-        s.m.texcache = {}
+    def load_textures(s, folder, keep=False):
+        """Load the textures whose PNGs sit beside the map. Opening a map starts from nothing. Saving passes keep=True:
+        textures you picked with Load PNG from some other folder are not beside the map, so they must stay loaded
+        (a texture that wasn't found before is looked up again, in case the map now sits next to it).
+        (Others are looked for later, the first time they are drawn.)"""
+        if keep:
+            for k in [k for k, v in s.m.texcache.items() if v is None and not is_remote_texture(k)]: del s.m.texcache[k]
+        else:
+            s.m.texcache = {}
         s.m.prefetch_remote()
         if not folder: return
         for mat in s.m.materials.values():
@@ -4305,7 +4729,7 @@ class Win(QMainWindow):
             with open(path, 'w', encoding='utf-8') as f: f.write(s.m.text())
         except OSError as e:
             QMessageBox.warning(s, 'Save failed', str(e)); return
-        s.m.path = path; s.load_textures(os.path.dirname(path)); s.title(); s.add_recent(path)
+        s.m.path = path; s.load_textures(os.path.dirname(path), keep=True); s.title(); s.add_recent(path)
 
 
 def load_app_icon():
