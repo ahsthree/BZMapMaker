@@ -60,7 +60,7 @@ jobs:
 
       - name: Build macOS App (.app)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" main.py
+	pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" bzmapmaker.py
 
       - name: Archive macOS Build
         run: |
