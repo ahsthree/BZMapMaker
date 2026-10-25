@@ -6,6 +6,13 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 **Current release: 1.5.0** · [Download](https://github.com/ahsthree/BZMapMaker/releases/tag/v1.5.0) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
+Custom objects are extracted from the bzmapmaker-objects-1.4.9 archive 
+(including subdirectories like 'nature' and 'other') into platform-specific 
+shared directories: /usr/share/bzmapmaker/objects/ on Linux, 
+C:\ProgramData\BZMapMaker\objects\ on Windows, and 
+/Library/Application Support/BZMapMaker/objects/ on macOS.
+
+
 ## Features & Screenshots
 
 ![BZMapMaker v1.5.0 Features](https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.0.jpeg)
