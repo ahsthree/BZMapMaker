@@ -4,28 +4,27 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.4.9** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+**Current release: 1.5.0** · [Download](https://github.com/ahsthree/BZMapMaker/releases/tag/v1.5.0) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
-<<<<<<< HEAD
-<p align="center">
-  <img src="assets/images/bzmapmaker-features.jpeg" alt="BZMapMaker Features Overview" width="700">
-</p>
+## Features & Screenshots
 
-<p align="center">
-  <img src="assets/images/bzmm-display.png" alt="BZMapMaker Display" width="700">
-</p>
+![BZMapMaker v1.5.0 Features](https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.0.jpeg)
 
-<p align="center">
-  <img src="assets/images/bzmm-advanced-display.png" alt="BZMapMaker Advanced Display" width="700">
-</p>
-=======
-[![Screenshot From 2026-09-30 19-43-21](https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006)](https://github.com/user-attachments/assets/25c6992b-4673-46d5-942a-45d08dc6e006)
-[![Screenshot From 2026-09-30 19-44-01](https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a)](https://github.com/user-attachments/assets/0d1c4358-5a21-4fcc-ab69-987267525b4a)
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
+![App Screenshot](https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/Screenshot%20From%202026-10-24%2021-08-48.png)
 
-## What's new in 1.4.9
+## What's new in 1.5.0
 
-<<<<<<< HEAD
+## What's New in v1.5.0
+
+Version 1.5.0 introduces major workflow enhancements, robust cross-platform packaging, and advanced map-editing tools for the BZFlag community:
+
+* **Cross-Platform Native Builds**: Fully automated CI/CD pipeline delivering ready-to-run binaries for Windows (`.exe`), macOS (`.app`), and Debian Linux (`.deb`).
+* **Dual 2D & 3D Viewports**: Seamlessly switch between precision 2D top-down editing and interactive 3D wireframe previews.
+* **Terrain Generator & Custom Objects Library**: Integrated procedural terrain generation tools paired with a robust custom objects library to supercharge map creation.
+* **Procedural Symmetry & Tools**: Powerful symmetry utilities and automated obstacle generation tools to speed up complex layout design.
+* **Advanced Mesh & Object Management**: Enhanced mesh grouping, custom asset integration, and precise control over ricochet properties.
+* **Physics Trajectory Visualization**: Built-in visual aids to preview shot trajectories and map physics directly within the editor.
+
 
 ## What's new in 1.4.9
 
