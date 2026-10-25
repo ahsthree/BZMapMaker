@@ -40,7 +40,7 @@ jobs:
 
       - name: Build Executable with PyInstaller
         run: |
-          pyinstaller --noconfirm --onedir --windowed bz_mapmaker.spec
+          pyinstaller --noconfirm bz_mapmaker.spec
         shell: bash
 
       - name: Extract and Include Custom Objects
