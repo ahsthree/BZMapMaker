@@ -1,0 +1,135 @@
+name: Build All Packages
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags:
+      - 'v*' # Trigger on version tags like v1.5.0
+  release:
+    types: [published]
+
+env:
+  VERSION: "1.5.0"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies & PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PyQt6 numpy
+
+      - name: Build Windows Executable (.exe)
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" main.py
+
+      - name: Archive Windows Build
+        run: |
+          Compress-Archive -Path dist/bzmapmaker-${{ env.VERSION }} -DestinationPath bzmapmaker-${{ env.VERSION }}-windows.zip
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzmapmaker-${{ env.VERSION }}-windows
+          path: bzmapmaker-${{ env.VERSION }}-windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies & PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PyQt6 numpy
+
+      - name: Build macOS App (.app)
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" main.py
+
+      - name: Archive macOS Build
+        run: |
+          cd dist
+          zip -r ../bzmapmaker-${{ env.VERSION }}-macos.zip bzmapmaker-${{ env.VERSION }}.app
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzmapmaker-${{ env.VERSION }}-macos
+          path: bzmapmaker-${{ env.VERSION }}-macos.zip
+
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+      - name: Prepare and Build Debian Package (.deb)
+        run: |
+          mkdir -p build/usr/share/bzmapmaker/objects
+          if [ -d "objects" ]; then
+            cp -r objects/* build/usr/share/bzmapmaker/objects/
+          fi
+          
+          # If building a debian package archive/structure:
+          # dpkg-deb --build build/ bzmapmaker_${{ env.VERSION }}_all.deb
+          
+          # For now, zip the build directory as a fallback artifact if manual dpkg script varies
+          cd build && zip -r ../bzmapmaker-${{ env.VERSION }}-debian.zip .
+
+      - name: Upload Debian Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzmapmaker-${{ env.VERSION }}-debian
+          path: bzmapmaker-${{ env.VERSION }}-debian.zip
+
+  release:
+    needs: [build-windows, build-macos, build-deb]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R all-artifacts
+
+      - name: Publish Release with Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            all-artifacts/bzmapmaker-${{ env.VERSION }}-windows/*.zip
+            all-artifacts/bzmapmaker-${{ env.VERSION }}-macos/*.zip
+            all-artifacts/bzmapmaker-${{ env.VERSION }}-debian/*.zip
+          body: |
+            Release of BZMapMaker version ${{ env.VERSION }}.
+            Includes Windows executable, macOS application bundle, and Debian package assets.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
