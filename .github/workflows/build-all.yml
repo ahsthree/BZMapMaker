@@ -57,16 +57,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller PyQt6 numpy
-
-      - name: Build macOS App (.app)
+- name: Build macOS App (.app)
         run: |
-	pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" bzmapmaker.py
+          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" bzmapmaker.py
 
       - name: Archive macOS Build
         run: |
           cd dist
           zip -r ../bzmapmaker-${{ env.VERSION }}-macos.zip bzmapmaker-${{ env.VERSION }}.app
-
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4
         with:
