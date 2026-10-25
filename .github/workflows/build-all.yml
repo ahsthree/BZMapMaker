@@ -30,7 +30,7 @@ jobs:
 
       - name: Build Windows Executable (.exe)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" main.py
+          pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" bzmapmaker.py
 
       - name: Archive Windows Build
         run: |
@@ -57,7 +57,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller PyQt6 numpy
-- name: Build macOS App (.app)
+
+      - name: Build macOS App (.app)
         run: |
           pyinstaller --noconfirm --onedir --windowed --name "bzmapmaker-${{ env.VERSION }}" bzmapmaker.py
 
@@ -65,6 +66,7 @@ jobs:
         run: |
           cd dist
           zip -r ../bzmapmaker-${{ env.VERSION }}-macos.zip bzmapmaker-${{ env.VERSION }}.app
+
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -93,11 +95,6 @@ jobs:
           if [ -d "objects" ]; then
             cp -r objects/* build/usr/share/bzmapmaker/objects/
           fi
-          
-          # If building a debian package archive/structure:
-          # dpkg-deb --build build/ bzmapmaker_${{ env.VERSION }}_all.deb
-          
-          # For now, zip the build directory as a fallback artifact if manual dpkg script varies
           cd build && zip -r ../bzmapmaker-${{ env.VERSION }}-debian.zip .
 
       - name: Upload Debian Artifact
