@@ -8,7 +8,7 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, random, urllib.request
 
-__version__ = '1.4.9'
+__version__ = '1.5.0'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QRect, QSize, QSettings, QTimer, QUrl
@@ -866,15 +866,15 @@ _LIBCACHE = {}
 
 
 def load_library_content(path):
-    """(objs, defines, materials) of a library file with the map-specific objects removed, or None."""
+    """(objs, defines, materials, texmats, physics) of a library file with the map-specific objects removed, or None."""
     try:
         key = (path, os.path.getmtime(path))
         if key not in _LIBCACHE:
             with open(path, encoding='utf-8', errors='replace') as fh: text = fh.read()
-            _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(text)
+            _nw, objs, materials, defines, _x, _o, physics, _w, texmats = parse(text)
             objs = [o for o in objs if o.t not in LIB_SKIP]
             defines = {n: [k for k in ks if k.t not in LIB_SKIP] for n, ks in defines.items()}
-            _LIBCACHE[key] = (objs, defines, materials, texmats)
+            _LIBCACHE[key] = (objs, defines, materials, texmats, physics)
         return copy.deepcopy(_LIBCACHE[key])
     except OSError:
         return None
@@ -895,6 +895,25 @@ def _rename_material_in(objs, mapping):
             for ln in MESHDATA.get(o.mesh, []):
                 p = ln.split()
                 if len(p) > 1 and p[0].lower() == 'matref' and p[1] in mapping: ln = 'matref ' + mapping[p[1]]
+                body.append(ln)
+            o.mesh = mesh_register(body)
+
+
+def _phys_sig(pd):
+    """A physics driver's text without its name, to tell whether two drivers are the same one."""
+    return '\n'.join(l.strip() for l in physics_block(pd) if l.split()[:1] != ['name'])
+
+
+def _rename_phydrv_in(objs, mapping):
+    """Point objects at renamed physics drivers (their own phydrv field and the phydrv lines inside mesh data)."""
+    if not mapping: return
+    for o in objs:
+        if o.phydrv in mapping: o.phydrv = mapping[o.phydrv]
+        if o.t == 'mesh' and o.mesh:
+            body = []
+            for ln in MESHDATA.get(o.mesh, []):
+                p = ln.split()
+                if len(p) > 1 and p[0].lower() == 'phydrv' and p[1] in mapping: ln = 'phydrv ' + mapping[p[1]]
                 body.append(ln)
             o.mesh = mesh_register(body)
 
@@ -937,7 +956,7 @@ def _uses_in(objs, defines):
     return mats, phys
 
 
-def library_text(name, category, description, objs, defines, materials, texmats=None):
+def library_text(name, category, description, objs, defines, materials, texmats=None, physics=None):
     """The .bzw text of a library object: header, the materials it uses, the prefabs it needs, then the objects."""
     need, order = set(), []
 
@@ -951,6 +970,8 @@ def library_text(name, category, description, objs, defines, materials, texmats=
         if o.t == 'group': visit(o.name)
     used = _materials_used(objs, defines)
     out = [lib_header(name, category, description), '# Made with BZ Map Maker', '']
+    for pn in sorted(_uses_in(objs, defines)[1]):  # physics drivers the objects use, defined before anything that names them
+        if pn in (physics or {}): out += physics_block(physics[pn]) + ['']
     wanted = {t for mn in used if mn in materials for t in _texmat_names(materials[mn])}
     for tn in sorted(wanted):  # a material's texturematrix has to be defined before it
         if tn in (texmats or {}): out += texmatrix_block(texmats[tn]) + ['']
@@ -989,7 +1010,7 @@ def library_path_for(name, directory=None):
     return path, False
 
 
-def save_library_object(name, category, description, objs, defines, materials, texmats=None, directory=None):
+def save_library_object(name, category, description, objs, defines, materials, texmats=None, directory=None, physics=None):
     """Write objs (centred on the origin, map-only objects left out) into the person's library. Returns the path, or None."""
     objs = copy.deepcopy([o for o in objs if o.t not in LIB_SKIP])
     if not objs: return None
@@ -999,7 +1020,7 @@ def save_library_object(name, category, description, objs, defines, materials, t
     directory = directory or user_library_dir()
     os.makedirs(directory, exist_ok=True)
     path, _ = library_path_for(name, directory)
-    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials, texmats or {}))
+    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials, texmats or {}, physics or {}))
     _LIBCACHE.clear()
     return path
 
@@ -1008,14 +1029,14 @@ def import_into_library(src, name, category, description, split=False, directory
     """Copy the objects (and the materials and prefabs they need) from another .bzw into the library.
     Returns the list of files written; [] if the file held nothing a library object can be made of."""
     with open(src, encoding='utf-8', errors='replace') as fh: text = fh.read()
-    _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(text)
+    _nw, objs, materials, defines, _x, _o, physics, _w, texmats = parse(text)
     objs = [o for o in objs if o.t not in LIB_SKIP]
     if not objs: return []
     groups = [[o] for o in objs] if (split and len(objs) > 1) else [objs]
     out = []
     for i, grp in enumerate(groups, 1):
         label = name if len(groups) == 1 else '%s %d' % (name, i)
-        p = save_library_object(label, category, description, grp, defines, materials, texmats, directory)
+        p = save_library_object(label, category, description, grp, defines, materials, texmats, directory, physics)
         if p: out.append(p)
     return out
 
@@ -1249,28 +1270,35 @@ class Model(QObject):
         if not got or not got[0]: return None
         return s.place_content(item.name, *got, x, y)
 
-    def place_content(s, name, objs, defines, materials, texmats, x, y):
-        """Add parsed objects to the map as one group instance called name at (x, y), bringing their materials, texturematrix
-        and prefabs along (see place_library). Used for library objects and for generated terrain. Returns the group."""
-        slug = lib_slug(name); rename = {}; tmap = {}
-        for name, tm in texmats.items():
-            have = s.texmats.get(name)
-            if have is None: s.texmats[name] = tm; continue
-            if _tm_sig(have) == _tm_sig(tm): continue  # the map already has this one
+    def merge_resources(s, materials, texmats, physics):
+        """Bring materials, texturematrix and physics drivers from another file into the map. One the map already has with the
+        same content is shared (also when an earlier import already brought it in under a new name); a different one with the same
+        name comes in under a new name. Returns ({old material name: new}, {old physics driver name: new}) so the objects that
+        came with them can be pointed at the new names."""
+        def take(store, name, item, sig, batch):
+            """None if `item` is now in the map under its own name, else the name it has in the map instead."""
+            have = store.get(name)
+            if have is None: store[name] = item; return None
+            if sig(have) == sig(item): return None  # the map already has this one
+            for k, v in store.items():  # an earlier import may have brought this exact one in as name_2, name_3...
+                if k.startswith(name + '_') and k[len(name) + 1:].isdigit() and sig(v) == sig(item): return k
             n, i = name, 1
-            while n in s.texmats or n in texmats: i += 1; n = '%s_%d' % (name, i)
-            tm.name = n; tm.raw = [('name ' + n) if ln.split()[:1] == ['name'] else ln for ln in tm.raw]
-            s.texmats[n] = tm; tmap[name] = n
+            while n in store or n in batch: i += 1; n = '%s_%d' % (name, i)
+            item.name = n; item.raw = [('name ' + n) if ln.split()[:1] == ['name'] else ln for ln in item.raw]
+            store[n] = item
+            return n
+        pmap = {n: r for n in (physics or {}) if (r := take(s.physics, n, physics[n], _phys_sig, physics))}
+        tmap = {n: r for n in list(texmats) if (r := take(s.texmats, n, texmats[n], _tm_sig, texmats))}
         if tmap:
             for mat in materials.values(): _retarget_texmat(mat, tmap)
-        for name, mat in materials.items():
-            have = s.materials.get(name)
-            if have is None: s.materials[name] = mat; continue
-            if _mat_sig(have) == _mat_sig(mat): continue  # same material already in the map
-            n, i = name, 1
-            while n in s.materials or n in materials: i += 1; n = '%s_%d' % (name, i)
-            mat.name = n; mat.raw = [('name ' + n) if ln.split()[:1] == ['name'] else ln for ln in mat.raw]
-            s.materials[n] = mat; rename[name] = n
+        rename = {n: r for n in list(materials) if (r := take(s.materials, n, materials[n], _mat_sig, materials))}
+        return rename, pmap
+
+    def place_content(s, name, objs, defines, materials, texmats, physics, x, y):
+        """Add parsed objects to the map as one group instance called name at (x, y), bringing their materials, texturematrix,
+        physics drivers and prefabs along (see place_library). Used for library objects and for generated terrain. Returns the group."""
+        slug = lib_slug(name)
+        rename, pmap = s.merge_resources(materials, texmats, physics)
         sig = lambda kids: '\n'.join('\n'.join(obj_block(k)) for k in kids)
         dmap = {}
 
@@ -1278,14 +1306,14 @@ class Model(QObject):
             if dn in dmap: return dmap[dn]
             if dn not in defines or depth > MAX_NEST: return dn
             dmap[dn] = dn  # a prefab that (wrongly) contains itself stops here
-            kids = defines[dn]; _rename_material_in(kids, rename)
+            kids = defines[dn]; _rename_material_in(kids, rename); _rename_phydrv_in(kids, pmap)
             for k in kids:
                 if k.t == 'group': k.name = bring(k.name, depth + 1)
             base = n = '%s__%s' % (slug, dn); i = 1
             while n in s.defines and sig(s.defines[n]) != sig(kids): i += 1; n = '%s_%d' % (base, i)
             s.defines.setdefault(n, kids); dmap[dn] = n
             return n
-        _rename_material_in(objs, rename)
+        _rename_material_in(objs, rename); _rename_phydrv_in(objs, pmap)
         for o in objs:
             if o.t == 'group': o.name = bring(o.name)
         if len(objs) == 1 and objs[0].t == 'group':
@@ -4569,11 +4597,11 @@ class Win(QMainWindow):
         dlg = TerrainDialog(s, s.m.W, clear, idx, sorted(s.m.materials))
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.text: return
         try:
-            _nw, objs, materials, defines, _x, _o, _p, _w, texmats = parse(dlg.text)
+            _nw, objs, materials, defines, _x, _o, physics, _w, texmats = parse(dlg.text)
         except Exception as e:
             QMessageBox.warning(s, 'Generate Terrain', 'The terrain could not be added: %s' % e); return
         s.m.push()
-        g = s.m.place_content('terrain', objs, defines, materials, texmats, 0, 0)
+        g = s.m.place_content('terrain', objs, defines, materials, texmats, physics, 0, 0)
         s.m.select(g); s.m.changed.emit()
         s.statusBar().showMessage('Terrain added. The ground is at z = %g: put bases and other objects at that height. '
                                   'Tanks need -set _noClimb 0 to climb the slopes.' % dlg.run_p.flat_z, 20000)
@@ -4623,7 +4651,7 @@ class Win(QMainWindow):
         if not dlg.exec(): return
         name, cat, desc, _split = dlg.values()
         if not s._confirm_replace(name): return
-        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials, s.m.texmats)
+        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials, s.m.texmats, physics=s.m.physics)
         except OSError as e:
             QMessageBox.warning(s, 'Save failed', str(e)); return
         msg = 'Saved "%s" to My Objects.' % name
@@ -4640,11 +4668,13 @@ class Win(QMainWindow):
             with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
         except OSError as e:
             QMessageBox.warning(s, 'Import failed', str(e)); return
-        nw, objs, materials, defines, extras, options_text, physics, _world, _texmats = parse(text)
+        nw, objs, materials, defines, extras, options_text, physics, _world, texmats = parse(text)
         meshes = [o for o in objs if o.t == 'mesh']
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
         s.m.push()
+        rename, pmap = s.m.merge_resources(materials, texmats, physics)  # their materials, texturematrix and physics drivers come along
+        _rename_material_in(meshes, rename); _rename_phydrv_in(meshes, pmap)
         for mo in meshes:
             mo.uid = s.m.nid; s.m.nid += 1
         # Wrapped in a group rather than added as loose top-level meshes: a mesh is often the
@@ -4653,8 +4683,6 @@ class Win(QMainWindow):
         # rotation per instance -- the prefab itself (and the mesh data) is stored once.
         g = s.m.make_group(meshes, 'mesh-group')
         s.m.objs.append(g)
-        for name, mat in materials.items():  # bring along any materials the mesh's faces refer to
-            s.m.materials.setdefault(name, mat)
         s.m.select(g); s.m.changed.emit()
         skipped = len(objs) - len(meshes)
         msg = 'Imported %d mesh object%s from %s.' % (len(meshes), '' if len(meshes) == 1 else 's', os.path.basename(path))
