@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/bzmapmaker-logo.png" alt="BZ Map Maker logo" width="180">
-</p>
+
 
 # BZ Map Maker
 
@@ -9,7 +7,9 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 > Unofficial fan project, not affiliated with the BZFlag project.
 
 **Current release: 1.5.1** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
-
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
+</p>
 
 ## What's new in 1.5.1
 
