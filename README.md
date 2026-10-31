@@ -1,54 +1,28 @@
+<p align="center">
+  <img src="assets/bzmapmaker-logo.png" alt="BZ Map Maker logo" width="180">
+</p>
+
 # BZ Map Maker
 
 A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by the classic BZEdit. It edits `.bzw` world files, lets you build and edit directly in a live 3D view, and can build symmetrical (balanced) capture-the-flag maps for you automatically.
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.5.0** · [Download](https://github.com/ahsthree/BZMapMaker/releases/tag/v1.5.0) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
-
-Custom objects are extracted from the bzmapmaker-objects-1.4.9 archive 
-(including subdirectories like 'nature' and 'other') into platform-specific 
-shared directories: /usr/share/bzmapmaker/objects/ on Linux, 
-C:\ProgramData\BZMapMaker\objects\ on Windows, and 
-/Library/Application Support/BZMapMaker/objects/ on macOS.
+**Current release: 1.5.1** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
 
-## Features & Screenshots
+## What's new in 1.5.1
 
-![BZMapMaker v1.5.0 Features](https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.0.jpeg)
-
-![App Screenshot](https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/Screenshot%20From%202026-10-24%2021-08-48.png)
+- **Names for every object.** Select any object and use the new **Name** box (the BZW `name` line). Boxes, pyramids, bases, arcs, cones, zones, weapons, meshes, teleporters and groups all take a name; it is saved in the map and read back when you open it (a box's name used to be lost on saving). A group's name is its instance name; you can rename groups freely. An object with no name of its own shows in lists as `box1`, `pyramid2`, `group1`, `group2` and so on, and nothing is written to the file for it. Spaces in a name become underscores. A teleporter always keeps a name, and renaming one renames the links that point to it. Copies made with Duplicate or by symmetry start unnamed, so names stay unique.
+- **Objects tab.** A new tab next to **Map Text (advanced)** lists every object on the map with its name, kind and position, so you can pick one in a crowded map without clicking it. Click a row to select that object, Ctrl or Shift+click for several; selecting on the map highlights the same rows. The search box looks at the name, kind, group prefab, material, physics driver, base team and position ("red base", "tower", "wall"); every word you type must match. Click a heading to sort. Objects inside a group are edited through the group, as before.
+- **Passability for groups.** Select a group and use the new **Passability** box (Normal, Drivethrough, Shootthrough, Passable); it applies to everything in the group. A `drivethrough`, `shootthrough` or `passable` line in a group's text is now kept when you use Apply to Map (a `passable` line used to be dropped). A passable group is saved as `drivethrough` plus `shootthrough`, which BZFlag treats the same.
+- **All of BZFlag's default textures are built in.** The 82 standard images (`std_ground`, `wall`, `roof`, `boxwall`, `pyrwall`, `caution`, `mesh`, `water`, `zone_ground`, the team base textures, the mountains and the rest) are included as small stand-ins, so a material that names one, with or without `.png`, shows it in the 3D view without any files; a real file beside the map is used instead when there is one. The base, ground and wall textures now look like the real ones.
 
 ## What's new in 1.5.0
 
-## What's New in v1.5.0
-
-Version 1.5.0 introduces major workflow enhancements, robust cross-platform packaging, and advanced map-editing tools for the BZFlag community:
-
-* **Cross-Platform Native Builds**: Fully automated CI/CD pipeline delivering ready-to-run binaries for Windows (`.exe`), macOS (`.app`), and Debian Linux (`.deb`).
-* **Dual 2D & 3D Viewports**: Seamlessly switch between precision 2D top-down editing and interactive 3D wireframe previews.
-* **Terrain Generator & Custom Objects Library**: Integrated procedural terrain generation tools paired with a robust custom objects library to supercharge map creation.
-* **Procedural Symmetry & Tools**: Powerful symmetry utilities and automated obstacle generation tools to speed up complex layout design.
-* **Advanced Mesh & Object Management**: Enhanced mesh grouping, custom asset integration, and precise control over ricochet properties.
-* **Physics Trajectory Visualization**: Built-in visual aids to preview shot trajectories and map physics directly within the editor.
-
-
-## What's new in 1.4.9
-
-- **Internet textures load by themselves.** The `http://` textures a map uses (such as `http://images.bzflag.org/...`) are now downloaded in the background when you open the map, so the 3D view shows them without any button. The picture never waits for the network: faces draw without the texture until it arrives, then fill in. Downloads are remembered on your computer, so the next time (even offline) they appear at once. Turn it off with **View → Load Remote Textures Automatically**. **Fetch All URL Textures** is still there to retry any that failed. See [Materials](#materials).
-- **Texture size.** Select a box, pyramid, arc or cone and use the new **Texture size** field to set BZFlag's `texsize` (4 numbers for a box, pyramid or arc; 2 for a cone). A negative number is the size of one texture tile in world units, a positive one is relative to the object's size, so `1 1 1 1` on a box or pyramid gives one texture per face. Leave it blank and nothing is written, so BZFlag uses its default. Existing `texsize` lines in a map are read and kept. The 3D preview does not apply it.
-- **Arcs are drawn the way BZFlag draws them.** In bzfs an arc's `rotation` does not turn its shape: the ellipse (X size by Y size) always lines up with the world axes, and `rotation` only sets the angle where the first corner, or the start of a partial sweep, sits. The 2D view, 3D view, selection and clicking now do the same, so an elliptical arc looks in the editor the way it does in the game. Round arcs look exactly as before. Groups still turn the whole arc. To point an elliptical arc diagonally, swap its sizes or use a `spin` transform in a group. Symmetry copies of an elliptical arc keep the same axes instead of turning with the copy, as in the game.
-- **`addtexture` is read like `texture`.** Older maps often give a material's picture with `addtexture`; it now fills the Texture field, shows in the 3D view and can be fetched, exactly like `texture`. Maps you don't edit are saved exactly as they were, and any extra `addtexture` layers are kept.
-
-### Also new in 1.4.8
-
-- **Custom object library.** **Objects → Custom Objects** lists ready-made mesh objects (a crate, a lamp post, planters, a street corner...) by category; pick one and click in the 2D or 3D view to place it as a group. You can add your own with **Import into My Objects...** (from any `.bzw`) or **Save Selection to My Objects...** (from your current map), and the materials come along. See [Custom objects](#custom-objects).
-- **Textures in the 3D view, and a faster, smarter one.** Boxes, pyramids, arcs and cones show BZFlag's own default textures when they have no material, as in the game, and faces with a texture show a tiny version of it (shrunk so its longer side is at most 16 pixels, which keeps memory trivial however big the file is) repeated across the surface, plus an optional **edge shading** that darkens the far side of sharp depth steps for a contact-shadow look. Both are switches in the **View** menu. The renderer itself is about 1.6 times faster on busy maps with exactly the same picture, and dropping to half resolution while you orbit now only happens when it actually saves time. See [Notes on the 3D view](#notes-on-the-3d-view).
-- **Remove Unused.** Placing a custom object adds its group definition (and materials) to the map, and deleting the placed copy leaves them behind. **Objects → Remove Unused...** lists the group definitions nothing places, plus the materials, texture matrices and physics drivers only they used, and deletes the ones you leave ticked. Saving can offer to do the same. See [Removing unused groups](#removing-unused-groups-and-materials).
-- **Texture matrices.** **Objects → Texture Matrices...** creates and edits `textureMatrix` blocks (shift, spin and scale, fixed or changing over time), and the Materials dialog has a **Texture matrix** field to give a material one. Existing texture matrices in a map are now read, editable and saved properly instead of just carried through.
-=======
 - **Internet textures load by themselves.** The `http://` textures a map uses (such as `http://images.bzflag.org/...`) are now downloaded in the background when you open the map, so the 3D view shows them without any button. The picture never waits for the network: faces draw without the texture until it arrives, then fill in. Downloads are remembered on your computer, so the next time (even offline) they appear at once. Turn it off with **View → Load Remote Textures Automatically**. **Fetch All URL Textures** is still there to retry any that failed. See [Materials](#materials).
 - **Bases have their textures back.** In the 3D view a base shows its team's `basetop` picture across its top and bottom (once, turning with the base) and its team's `basewall` picture on the sides, in red, green, blue or purple. BZFlag can't give a base a material, so a base always shows these textures.
+- **Imports bring physics along.** Importing a mesh object, placing a custom object, or saving a selection to My Objects now carries the object's `physics` blocks and every `phydrv` reference (on objects, on a mesh and on its faces), just as materials already came along. A driver the map already has with the same content is shared; a different one with the same name comes in under a new name (`name_2`) and everything that uses it is pointed at it. Materials and texturematrix that clash are handled the same way, so placing the same object twice no longer piles up copies.
 - **Generate Terrain.** **Objects → Generate Terrain...** builds random hills and valleys over the whole world as one mesh, modelled on a Wings 3D terrain: a flat plain with the hills rising in tiers, and invisible sides and bottom. You choose how much of the world stays flat, the symmetry (off, 2-team 180°, 4-team 90°, mirror left-right or top-bottom), the share of valleys, the feature size, the tallest hill, whether hills are stepped with flat landings, the steepest slope, the height of the flat ground and the random seed. The same seed gives the same terrain, and a top view shows it before you add it. Ground around the objects already on the map stays flat. See [Generate Terrain](#generate-terrain).
 - **More custom objects included.** The library now ships 15 nature objects (trees, rocks, weeds, ferns) and 4 others (a dome, a penny and two ramps).
 - **Texture size.** Select a box, pyramid, arc or cone and use the new **Texture size** field to set BZFlag's `texsize` (4 numbers for a box, pyramid or arc; 2 for a cone). A negative number is the size of one texture tile in world units, a positive one is relative to the object's size, so `1 1 1 1` on a box or pyramid gives one texture per face. Leave it blank and nothing is written, so BZFlag uses its default. Existing `texsize` lines in a map are read and kept. The 3D preview does not apply it.
@@ -61,7 +35,6 @@ Version 1.5.0 introduces major workflow enhancements, robust cross-platform pack
 - **Textures in the 3D view, and a faster, smarter one.** Boxes, pyramids, arcs and cones show BZFlag's own default textures when they have no material, as in the game, and faces with a texture show a tiny version of it (shrunk so its longer side is at most 16 pixels, which keeps memory trivial however big the file is) repeated across the surface, plus an optional **edge shading** that darkens the far side of sharp depth steps for a contact-shadow look. Both are switches in the **View** menu. The renderer itself is about 1.6 times faster on busy maps with exactly the same picture, and dropping to half resolution while you orbit now only happens when it actually saves time. See [Notes on the 3D view](#notes-on-the-3d-view).
 - **Remove Unused.** Placing a custom object adds its group definition (and materials) to the map, and deleting the placed copy leaves them behind. **Objects → Remove Unused...** lists the group definitions nothing places, plus the materials, texturematrix and physics drivers only they used, and deletes the ones you leave ticked. Saving can offer to do the same. See [Removing unused groups](#removing-unused-groups-and-materials).
 - **Texturematrix.** **Objects → Texturematrix...** creates and edits `textureMatrix` blocks (shift, spin and scale, fixed or changing over time), and the Materials dialog has a **Texturematrix** field to give a material one. Existing texturematrix in a map are now read, editable and saved properly instead of just carried through.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 - **Groups can nest and scale.** A group can hold other groups, as in BZFlag itself (a `define` still can't hold another `define`), and a group now has **Scale X/Y/Z** in the panel. Transforms are written in the order BZFlag needs: scale, then rotation, then shift. Teleporters inside nested groups keep their links.
 - **Objects → World Settings...** edits the whole `world` block: name, size, flag height, **No walls** and **Free CTF spawns**. Any other world parameter in a file is kept as written. Previously only `size` survived an open-and-save.
 - **Box select in the 2D view:** **Shift+drag** a rectangle to select every object whose center is inside it (**Ctrl+Shift+drag** adds to the current selection), then press **Ctrl+G** to group them.
@@ -77,7 +50,7 @@ Version 1.5.0 introduces major workflow enhancements, robust cross-platform pack
 - **Edit directly in 3D**, with the 2D view available either side by side or as a small radar overlay (**View** menu).
 - **A real per-pixel depth buffer** for the 3D view (built with NumPy), replacing the old approach of sorting whole shapes, so overlapping objects, especially long thin ones, always render in the correct order.
 - **Map Text panel**, tabbed with the Selected Object panel: view or hand-edit the raw `.bzw` text directly, with **Apply to Map** that can automatically build symmetry for anything new you typed, using whatever mode is active in the toolbar.
-- **Textures show in the 3D view** as small approximations of the picture, from local PNG files next to the map or from internet textures. BZFlag's own textures that have no file beside the map (`std_ground`, `wall`, `roof`, `boxwall`, `pyrwall` and the base textures) show a built-in stand-in, so generated terrain and most maps look textured without any files.
+- **Textures show in the 3D view** as small approximations of the picture, from local PNG files next to the map or from internet textures.
 - **Ctrl+click multi-select works in the 3D view too**, and 3D picking uses true ray depth, so an object hidden under another in the flat 2D view can be reached by orbiting to an angle where it's exposed and clicking it directly.
 - **3- and 4-team rotational symmetry**, generalized from the original 2-team mode, plus an axis compass in the 2D view and a live-turning gizmo in the 3D view.
 - **Arcs, cones, zones, world weapons, groups (reusable prefabs) and mesh objects** are readable and writable. All but meshes are editable, and group members can be edited one by one.
@@ -91,10 +64,7 @@ Version 1.5.0 introduces major workflow enhancements, robust cross-platform pack
 - **2D layout view**, either side by side with the 3D view or as a small fixed radar overlay in a corner of your choice.
 - **Objects:** boxes, pyramids, arcs, cones, team bases (red, green, blue, purple), teleporters, zones, world weapons, and prefab groups (which can nest and be scaled).
 - **Custom object library:** a menu of ready-made mesh objects you place like a box, plus your own personal collection, kept in a folder on your computer.
-<<<<<<< HEAD
-=======
 - **Terrain generator:** random symmetric hills and valleys with a flat-ground percentage you choose.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 - **Meshes:** opens `mesh` blocks from other maps (or a Modeltool-converted model) and keeps every normal, texture coordinate, and `drawinfo` byte for byte, even though the editor itself can't reshape one.
 - **Symmetry modes** that build a balanced map for you: 2, 3, or 4-team rotation, or a left-right/top-bottom mirror. Move one copy and the others follow.
 - **Materials**, including separate materials per face on boxes and arcs, a texture field that accepts a pasted image URL, and automatic color-from-texture so a textured object doesn't just render white.
@@ -112,9 +82,9 @@ Download the file for your system from the [Releases](../../releases) page.
 
 | System | File | How to install |
 | --- | --- | --- |
-| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.4.9_all.deb` | `sudo apt install ./bzmapmaker_1.4.9_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
-| Windows | `BZMapMaker-1.4.9-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
-| macOS | `BZMapMaker-1.4.9-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
+| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.5.1_all.deb` | `sudo apt install ./bzmapmaker_1.5.1_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
+| Windows | `BZMapMaker-1.5.1-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
+| macOS | `BZMapMaker-1.5.1-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
 
 To upgrade the `.deb`, install the newer file the same way.
 
@@ -198,11 +168,11 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building the packages yourself
 
-The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.4.9`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
+The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.5.1`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
 
 | Package | Command (run on that OS) | Output |
 | --- | --- | --- |
-| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.4.9_all.deb` |
+| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.5.1_all.deb` |
 | Windows | `build_windows.bat` | `dist\BZMapMaker.exe` and a `.zip` |
 | macOS | `./build_macos.sh` | `dist/BZMapMaker.app` and a `.dmg` |
 
@@ -324,8 +294,6 @@ A library object is an ordinary `.bzw` file, so you can make one in any tool. An
 
 Groups inside `define` blocks are fine (`define street` can place `group lamppost` and `group planter`), but a `define` can't contain another `define`. Remember scale, rotation, shift order inside a group.
 
-<<<<<<< HEAD
-=======
 ### Generate Terrain
 
 **Objects → Generate Terrain...** adds one mesh called `terrain` (a group you can move, delete or save as a custom object). It follows the example it was modelled on: the ground is a flat plain, hills rise from it in tiers, valleys sink below it, and the slab's sides and bottom use an invisible `clear` material. The materials `flat-ground` (texture `std_ground`) and `hill-mountain` (texture `wall`) are added to the map if they are missing; you can pick other materials in the dialog.
@@ -340,16 +308,11 @@ Groups inside `define` blocks are fine (`define street` can place `group lamppos
 
 In BZFlag, tanks drive only on flat ground unless the server is started with `-set _noClimb 0`, which lets them climb slopes of about 45°. If you use sloped terrain, tell players to use that setting.
 
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 ### Removing unused groups and materials
 
 Every group instance in a map uses a prefab, a `define` block that is saved in the file even if nothing places it any more. This happens when you place a custom object, decide it doesn't work, and delete it: the definition and the materials it brought stay in the file as filler. Two ways to clear them out:
 
-<<<<<<< HEAD
-- **Objects → Remove Unused...** shows a checklist of what nothing in the map uses: group definitions that nothing places (including ones only placed by other unused groups), and the materials, texture matrices and physics drivers that only those groups used. Untick anything you want to keep, then click **Remove Checked**. **Undo** (Ctrl+Z) brings it all back. Tick **Also list ... that nothing uses at all** to include things that were never used, such as a material you made but haven't assigned yet; those are left alone by default.
-=======
 - **Objects → Remove Unused...** shows a checklist of what nothing in the map uses: group definitions that nothing places (including ones only placed by other unused groups), and the materials, texturematrix and physics drivers that only those groups used. Untick anything you want to keep, then click **Remove Checked**. **Undo** (Ctrl+Z) brings it all back. Tick **Also list ... that nothing uses at all** to include things that were never used, such as a material you made but haven't assigned yet; those are left alone by default.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 - **When you save**, if the map has unused group definitions you are asked whether to remove them first: **Remove and Save**, **Save As Is**, or **Cancel**. Tick **Don't ask again** to stop the question; **Objects → Ask to Remove Unused When Saving** turns it back on.
 
 Anything a block this editor doesn't understand mentions by name is treated as in use, and removing a group definition never removes a material that something you are keeping still needs.
@@ -385,12 +348,7 @@ A few things to know:
 
 The 3D view colors each face by its material, and where a texture is available it draws a tiny version of it on the face (see Notes on the 3D view). A texture is available when its PNG sits beside the map (or in a `textures` folder there) with the texture's name, when you load a PNG here, or when you fetch an internet texture here. Textures are remembered by name, so it doesn't matter whether you load the PNG before or after naming the material. To avoid every textured object just showing up white when there isn't one:
 
-<<<<<<< HEAD
-- **Load PNG...** picks a local image file and automatically sets the material's color to that image's average color (unless you've already set a custom color yourself).
-- **Fetch Color from URL** does the same for a texture given as a web address, right now (handy for the one you are typing).
-=======
 - **Load PNG...** picks a local image file so the 3D view can show it. A material's color is never taken from its image; it stays whatever you set. The picture stays loaded while the program is open, including after you save. When you open a map again, textures are found only if their PNGs sit beside the map or in a `textures` folder next to it.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 - Opening a map that already has a texture file sitting next to it does this automatically too, and also keeps the tiny copy for the 3D view. A PNG you add beside the map later is picked up the next time you click **Add / Update** on that material.
 - **Internet textures load automatically.** When you open a map, every `http://` texture its materials use is downloaded in the background (and `https://` ones too, though BZFlag itself only loads `http://`), and the 3D view fills them in as they arrive. This is the only thing in the app that goes online, and it only ever downloads images the map asks for. Copies are kept in a cache folder (`~/.cache/bzmapmaker/textures` on Linux, `%LOCALAPPDATA%\BZMapMaker\cache\textures` on Windows, `~/Library/Caches/BZMapMaker/textures` on macOS) so the next open is instant and works offline; delete the folder to clear it. Untick **View → Load Remote Textures Automatically** to stop the app going online.
 - **Fetch All URL Textures** retries every internet texture that hasn't loaded (for example because you were offline), or loads them all if automatic loading is off.
@@ -406,19 +364,11 @@ http://images.bzflag.org/astevens/concrete.png
 - If the URL isn't under `http://images.bzflag.org/`, a warning appears. It still saves; the warning just tells you BZFlag clients may not download it by default.
 - A URL texture needs its `.png` extension; a local texture name (no `://`) doesn't.
 
-<<<<<<< HEAD
-Every other material setting from an imported file (`ambient`, `specular`, extra `addtexture` layers, and so on) is preserved exactly even though this editor doesn't expose controls for it. The **Texture matrix** field sets a material's `texmat`; see Texture matrices below.
-
-### Texture matrices
-
-**Objects → Texture Matrices...** manages the map's named `textureMatrix` blocks, which control how a material's texture moves. Pick one in the list or type a new name (no spaces), tick the settings you want, and click **Add / Update**. Only ticked settings are written, so a matrix that just scrolls doesn't also get unwanted zero lines.
-=======
 Every other material setting from an imported file (`ambient`, `specular`, extra `addtexture` layers, and so on) is preserved exactly even though this editor doesn't expose controls for it. The **Texturematrix** field sets a material's `texmat`; see Texturematrix below.
 
 ### Texturematrix
 
 **Objects → Texturematrix...** manages the map's named `textureMatrix` blocks, which control how a material's texture moves. Pick one in the list or type a new name (no spaces), tick the settings you want, and click **Add / Update**. Only ticked settings are written, so a matrix that just scrolls doesn't also get unwanted zero lines.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 
 | Setting | What it does |
 | --- | --- |
@@ -428,11 +378,7 @@ Every other material setting from an imported file (`ambient`, `specular`, extra
 | Scale over time | The texture dynamically changes size; u and v frequencies, then u and v scales. |
 | Center | The central point that spin and scale work around. |
 
-<<<<<<< HEAD
-To use one, open **Objects → Materials...**, pick the material (it needs a texture) and choose the matrix in its **Texture matrix** field. The matrices are written before the materials that use them. The 3D preview shows textures as small approximations and doesn't animate them, so you will see the movement in BZFlag itself. Custom objects whose materials use a texture matrix bring it along when you save or place them.
-=======
 To use one, open **Objects → Materials...**, pick the material (it needs a texture) and choose the matrix in its **Texturematrix** field. The matrices are written before the materials that use them. The 3D preview shows textures as small approximations and doesn't animate them, so you will see the movement in BZFlag itself. Custom objects whose materials use a texturematrix bring it along when you save or place them.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 
 ### Physics drivers
 
@@ -470,11 +416,7 @@ Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `bo
 - Each teleporter face holds one link in the editor (extra links in a file are kept as written, but not shown).
 - The custom object library has no picture previews yet, only names, categories and descriptions.
 - Comments in the file are lost on save.
-<<<<<<< HEAD
-- Textures in the 3D preview are 16-pixel approximations, repeated every 10 world units by a simple mapping that is not BZFlag's own, so they show the general look rather than exact placement or scale. Texture matrices (movement) are not shown.
-=======
 - Textures in the 3D preview are 16-pixel approximations, repeated every 10 world units by a simple mapping that is not BZFlag's own, so they show the general look rather than exact placement or scale. Texturematrix (movement) are not shown.
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 
 **Keep a backup of any map you didn't create in this editor** before saving over it, especially an unusually structured one.
 
@@ -493,11 +435,7 @@ It needs no graphics card or OpenGL, which keeps it dependable on school Chromeb
 
 ## Ideas for the future
 
-<<<<<<< HEAD
-- Texture mapping that follows BZFlag's own rules, and showing texture matrices moving
-=======
 - Texture mapping that follows BZFlag's own rules, and showing texturematrix moving
->>>>>>> 9e85454 (Add GitHub Actions build workflow and update project files)
 - An optional OpenGL 3D view for machines with a working graphics card (the lightweight NumPy one would stay the default and the fallback)
 - Editing mesh geometry (not just moving it)
 - An ungroup command

@@ -78,3 +78,26 @@ jobs:
         with:
           name: bzmapmaker-${{ matrix.os }}
           path: ${{ matrix.artifact_name }}
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Publish Release with Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            all-artifacts/bzmapmaker-*/*.zip
+          body: |
+            Release of BZMapMaker version ${{ github.ref_name }}.
+            Includes Windows and macOS executable packages.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
