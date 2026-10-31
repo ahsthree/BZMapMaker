@@ -78,3 +78,13 @@ jobs:
         with:
           name: bzmapmaker-${{ matrix.os }}
           path: ${{ matrix.artifact_name }}
+strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: BZMapMaker-${{ github.ref_name }}-Windows-x64.zip
+            executable_name: bz_mapmaker.exe
+          - os: macos-latest
+            artifact_name: BZMapMaker-${{ github.ref_name }}-macOS-x64.zip
+            executable_name: bz_mapmaker
