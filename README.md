@@ -1,4 +1,6 @@
-
+<p align="center">
+  <img src="assets/bzmapmaker-logo.png" alt="BZ Map Maker logo" width="180">
+</p>
 
 # BZ Map Maker
 
@@ -6,10 +8,27 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.5.1** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+**Current release: 1.5.3** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
 </p>
+
+
+## What's new in 1.5.3
+
+- **Faster 3D view on large maps (OpenGL).** The 3D view can now be drawn by your graphics card, which makes orbiting, panning and zooming noticeably smoother on large, complex maps. It is used automatically when it is there and works; otherwise the built-in NumPy renderer is used exactly as before, so nothing changes on machines without it.
+  - **Choose it:** **View → 3D Renderer**: *Automatic* (OpenGL on real graphics hardware, otherwise NumPy), *OpenGL* (use it even if it is emulated on the CPU), or *Software (NumPy)*. The status bar says which one is in use and which graphics card it found. Set `BZMM_RENDERER=software` (or `opengl`) in the environment to override the saved choice for one run.
+  - **What it needs:** the optional packages `PyOpenGL` and PyQt6's OpenGL module. On Debian and Ubuntu: `sudo apt install python3-opengl python3-pyqt6.qtopengl` (the `.deb` recommends them, so a normal `apt install` brings them in). With pip: `pip install PyOpenGL`. Without them, or without OpenGL 2.1, the NumPy renderer is used.
+  - **Automatic skips software OpenGL.** If the system's OpenGL is only emulated on the CPU (Mesa `llvmpipe`, `softpipe`, a virtual machine without 3D acceleration), Automatic uses NumPy instead, since the emulation is no faster.
+  - **Differences from the NumPy picture:** *Edge Shading in 3D* has no effect in OpenGL mode, and textures are the same small (16-pixel) copies. Selection outlines, labels, links and the compass are drawn exactly as before.
+  - **This is new, so please report problems.** If the 3D view goes blank, flickers, shows wrong colors or textures, is slower than before, or the program crashes, please open an issue at <https://github.com/ahsthree/BZMapMaker/issues> with: your operating system and desktop (for example "Debian 13, GNOME on Wayland"), the line the status bar shows after choosing *View → 3D Renderer → OpenGL* (it names your graphics card and OpenGL version), and whether *Software (NumPy)* looks right. You can always switch back with *View → 3D Renderer → Software (NumPy)*.
+
+## What's new in 1.5.2
+
+- **Border size for teleporters.** Select a teleporter and use the new **Border size** box to set the width of its frame (the BZW `border` line). Leave it at *default* and nothing is written, so BZFlag uses its own width (1.12 in the BZW documentation); a border already in a map is read, shown and kept, and symmetry copies share it. The 3D preview does not draw the frame, so you'll see the difference in BZFlag.
+- **Older maps are repaired when you open them, by their old numbers.** A teleporter with no name (or a repeated one) is named by its place in the old numbered sequence: the first teleporter in the file is `0`, the next `1`, and so on, which is what older maps' links like `from 2:f` count. So a repaired map reads `name 2` and `from 2:f`: the same numbers the old links used, now written out in full. A number still points at the same teleporter when others have real names. Links the panel can't show are kept as written: wildcards (`*:f`), several links from one teleporter face, and links into a group (`span:tin:f`); renaming a teleporter renames them too. Lines this editor doesn't know in a block are kept instead of dropped, such as a group's `shear` or a teleporter's `horizontal`.
+- **Hardpoints.** A new **Hardpoint** tool in the toolbar places the map object of the BZFS Hardpoint plugin. Click for a default 30 × 30 × 30 hardpoint, or drag corner to corner, then set its position, size, rotation and name in the panel (size works like a box's: half-widths across, full height). Shift+drag in the 2D view turns it. Every hardpoint has its own name (`hardpoint1`, `hardpoint2`, ...; change it in the Name box, and a name already in use is refused). It is saved as a `hardpoint` block with `name`, `pos` and `size` lines, plus a `rot` line when it is turned, and any other lines in such a block are kept exactly as they are (a `rotation` line is read as `rot`). The real game never draws a hardpoint, so the editor shows it as a see-through amber box (with a cross in the 2D view); put a visible box or mesh over it if players should see it. Hardpoints follow symmetry like any other object and stay at the top level of the map rather than inside a group.
 
 ## What's new in 1.5.1
 
@@ -82,9 +101,9 @@ Download the file for your system from the [Releases](../../releases) page.
 
 | System | File | How to install |
 | --- | --- | --- |
-| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.5.1_all.deb` | `sudo apt install ./bzmapmaker_1.5.1_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
-| Windows | `BZMapMaker-1.5.1-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
-| macOS | `BZMapMaker-1.5.1-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
+| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.5.3_all.deb` | `sudo apt install ./bzmapmaker_1.5.3_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
+| Windows | `BZMapMaker-1.5.3-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
+| macOS | `BZMapMaker-1.5.3-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
 
 To upgrade the `.deb`, install the newer file the same way.
 
@@ -168,11 +187,11 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building the packages yourself
 
-The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.5.1`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
+The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.5.3`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
 
 | Package | Command (run on that OS) | Output |
 | --- | --- | --- |
-| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.5.1_all.deb` |
+| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.5.3_all.deb` |
 | Windows | `build_windows.bat` | `dist\BZMapMaker.exe` and a `.zip` |
 | macOS | `./build_macos.sh` | `dist/BZMapMaker.app` and a `.dmg` |
 
@@ -424,7 +443,7 @@ Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `bo
 
 The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order. This fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
 
-It needs no graphics card or OpenGL, which keeps it dependable on school Chromebooks and other low-spec machines. What the picture is made of, from back to front:
+The NumPy renderer needs no graphics card or OpenGL, which keeps it dependable on school Chromebooks and other low-spec machines, and it is always the fallback. Since 1.5.3 the view can instead be drawn by the graphics card (View → 3D Renderer); the rest of this section describes what the NumPy renderer does, and the OpenGL one lights and textures faces the same way. What the picture is made of, from back to front:
 
 - **Base color:** each face's material color, shaded by a simple light direction.
 - **Default textures (View → Show Textures in 3D):** a face with no material gets what BZFlag gives it: boxes and arcs have `boxwall` walls with a `roof` top and bottom, pyramids are `pyrwall`, and cones are `boxwall`. These are 16-pixel versions built into the program, so nothing has to be installed, and nothing about them is written to your map. Give an object (or just one of its faces) a material and that replaces the default. Bases, teleporters, zones and meshes keep plain colors.

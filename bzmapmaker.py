@@ -6,15 +6,24 @@ Works on Windows, macOS and Linux. The 3D preview is drawn in software (QPainter
 OpenGL is required. Textures are applied to box faces with Qt's 2D projective quadToQuad
 transform, which is an exact planar homography, not an OpenGL approximation.
 """
-import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, random, urllib.request
+import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, random, ctypes, urllib.request
 
-__version__ = '1.5.1'
+__version__ = '1.5.3'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QRect, QSize, QSettings, QTimer, QUrl
+# ---- optional OpenGL: the 3D view uses the GPU when this all imports and a real (hardware) context can be made; otherwise the numpy renderer ----
+if sys.platform.startswith('linux') and os.environ.get('XDG_SESSION_TYPE') == 'wayland': os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+    from OpenGL import GL
+    GL_OK, GL_IMPORT_ERROR = True, ''
+except Exception as _gl_err:   # PyQt6's OpenGL widget or PyOpenGL ("pip install PyOpenGL") is missing
+    QOpenGLWidget = object; GL = None
+    GL_OK, GL_IMPORT_ERROR = False, str(_gl_err)
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QAction,
                           QActionGroup, QKeySequence, QPixmap, QTransform, QImage, QIcon, QDesktopServices,
-                          QShortcut, QTextCursor, QTextDocument, QTextCharFormat)
+                          QShortcut, QTextCursor, QTextDocument, QTextCharFormat, QSurfaceFormat)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDockWidget, QFormLayout,
                               QDoubleSpinBox, QSpinBox, QComboBox, QFileDialog, QMessageBox, QDialog,
                               QListWidget, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QLabel,
@@ -26,11 +35,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QSplitter, QDoc
 # ---------------------------------------------------------------------------
 DEF = {'box': (10, 10, 9.4), 'pyramid': (8.2, 8.2, 8.2), 'base': (20, 20, 0),
        'teleporter': (.5, 4, 10), 'arc': (10, 10, 10), 'cone': (10, 10, 10), 'group': (1, 1, 1), 'mesh': (0, 0, 0),
-       'zone': (10, 10, 1), 'weapon': (0, 0, 0)}
+       'zone': (10, 10, 1), 'weapon': (0, 0, 0), 'hardpoint': (30, 30, 30)}
 TEAM = ['', '#c8453b', '#3c9a5a', '#3a6fc4', '#8a55b5']
 TEAM_NAMES = ['', 'Red', 'Green', 'Blue', 'Purple']
 COL = {'box': '#8d939a', 'pyramid': '#b08a4e', 'teleporter': '#d0702a', 'arc': '#5c8a7a',
-       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8', 'zone': '#6b7280', 'weapon': '#e0702a'}
+       'cone': '#7a6a9a', 'group': '#a0a4ad', 'mesh': '#9aa0a8', 'zone': '#6b7280', 'weapon': '#e0702a', 'hardpoint': '#f5a623'}
 TSWAP = {1: 2, 2: 1, 3: 4, 4: 3}  # fixed pairing used by 2-fold symmetry: red<->green, blue<->purple
 # index -> (mode, fold). mode 'rot' = N-way rotation about the world center; the two mirror
 # modes are always a simple left-right or top-bottom reflection (fold is always 2 for those).
@@ -94,6 +103,8 @@ class Obj:
     trigger: str = ''; eventteam: int = 1  # weapon only: '' or 'oncap', and which team's cap fires it
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
+    border: float = -1.0  # teleporter: width of its frame; -1 = not set, so BZFlag's own default applies and nothing is written
+    extra: str = ''  # lines of its block this editor doesn't know (a teleporter's border...), kept and written back as they are
     texsize: str = ''  # box / pyramid / arc (4 numbers) or cone (2 numbers): BZW 'texsize' as written; '' = BZFlag's default (nothing is written)
     trot: float = 0.0  # arc leaf inside groups only: how far the enclosing groups turn the whole shape (see shape_turn)
 
@@ -246,6 +257,14 @@ def mesh_register(body):
     return key
 
 
+def rename_in_link(ident, old, new):
+    """A link end like "tele:f", "3:b" or "inst:tele:f" with the teleporter name `old` replaced by `new`."""
+    parts = ident.split(':')
+    i = len(parts) - 2 if len(parts) > 1 and parts[-1].lower() in ('f', 'b', '*', '') else len(parts) - 1
+    if 0 <= i < len(parts) and parts[i] == old: parts[i] = new
+    return ':'.join(parts)
+
+
 def clean_name(text):
     """A name as BZW wants it: one word (spaces become _), and no colon, which BZFlag uses between a group and what is inside it."""
     return re.sub(r'\s+', '_', (text or '').strip()).replace(':', '_')
@@ -383,7 +402,7 @@ def parse(text):
     nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
     world = new_world(); texmats = {}
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
-           'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon',
+           'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon', 'hardpoint',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
 
     def nm(a, d):
@@ -402,14 +421,20 @@ def parse(text):
         except ValueError: pass
         o.mode = meta.get('mode', '')
 
+    raw_of_block = []   # the lines of the block read_block just read, as written
+
     def read_block():
-        nonlocal i
-        v = {}
+        nonlocal i, raw_of_block
+        v = {}; raw_of_block = []
         while i < len(lines):
             p = lines[i].split(); i += 1
             if p[0].lower() == 'end': break
-            v[p[0].lower()] = p[1:]
+            v[p[0].lower()] = p[1:]; raw_of_block.append(' '.join(p))
         return v
+
+    def unknown_lines(known):
+        """Lines of the block just read whose keyword is not one of `known`: kept so saving doesn't lose them."""
+        return '\n'.join(ln for ln in raw_of_block if ln.split()[0].lower() not in known)
 
     def read_raw_block():
         # A block closes at an 'end' followed by another top-level keyword (or end of file),
@@ -539,6 +564,34 @@ def parse(text):
             zo.zflags = '\n'.join(zflags); zo.zteam = zteam; zo.zsafety = zsafety
             apply_meta(zo, line_meta)
             objs.append(zo)
+        elif k == 'hardpoint':
+            # The hardpoint plugin's own map object: a named box-shaped area (name, pos, size). Lines this editor doesn't know are kept as they are.
+            body = read_raw_block()
+            name = ''; hx = hy = hz = hr = 0.0; hsx, hsy, hsz = DEF['hardpoint']; other = []
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: name = q[1]
+                elif kk in ('position', 'pos'):
+                    try: hx, hy, hz = (float(a) for a in q[1:4])
+                    except Exception: pass
+                elif kk == 'size':
+                    try: hsx, hsy, hsz = (float(a) for a in q[1:4])
+                    except Exception: pass
+                elif kk in ('rot', 'rotation') and len(q) > 1:
+                    try: hr = float(q[1])
+                    except Exception: pass
+                else: other.append(ln)
+            used = {o.name for o in objs if o.t == 'hardpoint'}
+            if not name or name in used:   # every hardpoint needs its own name: the plugin cycles through them by name
+                j = 1
+                while 'hardpoint%d' % j in used: j += 1
+                name = 'hardpoint%d' % j
+            ho = Obj('hardpoint', hx, hy, hz, hsx, hsy, hsz, hr, 1, name)
+            ho.zflags = '\n'.join(other)
+            apply_meta(ho, line_meta)
+            objs.append(ho)
         elif k == 'weapon':
             body = read_raw_block()
             name = ''; wx = wy = wz = 0.0; wr = 0.0; wcolor = 0; tilt = 0.0
@@ -601,6 +654,7 @@ def parse(text):
             go.matref = (v.get('matref') or [''])[0]
             go.phydrv = (v.get('phydrv') or [''])[0]
             go.iname = ' '.join(v.get('name') or [])
+            go.extra = unknown_lines(GROUP_KEYS)
             apply_meta(go, line_meta)
             objs.append(go)
         elif k in ('box', 'pyramid', 'base', 'teleporter', 'arc', 'cone'):
@@ -629,6 +683,11 @@ def parse(text):
             hd, hs, hp = 'drivethrough' in v, 'shootthrough' in v, 'passable' in v
             o.phys = 'passable' if (hp or (hd and hs)) else 'drivethrough' if hd else 'shootthrough' if hs else 'normal'
             o.ricochet = 'ricochet' in v
+            if k == 'teleporter' and v.get('border'):
+                try: o.border = max(0.0, float(v['border'][0]))
+                except ValueError: pass
+            o.extra = unknown_lines(OBJ_KEYS | ({'border'} if k == 'teleporter' else set()) | {fk for fk, _ in FACES.get(k, [])} | ({'divisions', 'angle', 'ratio'} if k == 'arc' else {'divisions'} if k == 'cone' else set())
+                                    | ({'flipz'} if k == 'pyramid' else set()) | ({'texsize'} if k in ('arc', 'cone', 'box', 'pyramid') else set()))
             apply_meta(o, line_meta)
             objs.append(o)
         elif k in ('end', 'enddef'):
@@ -643,11 +702,16 @@ def parse(text):
         if o.t == 'teleporter':
             if not o.name or o.name in seen: o.name = ''
             else: seen.add(o.name)
+    # A teleporter with no usable name is named by its place in the old numbered sequence (0 for the first teleporter in the file, 1 for
+    # the next...), which is what older maps' links like "from 2:f" count. So the repaired name is the number the old links already use.
     j = 1
-    for o in objs:
-        if o.t == 'teleporter' and not o.name:
-            while 't%d' % j in seen: j += 1
-            o.name = 't%d' % j; seen.add(o.name)
+    for idx, o in enumerate(o for o in objs if o.t == 'teleporter'):
+        if not o.name:
+            if str(idx) not in seen: o.name = str(idx)
+            else:   # a teleporter someone named with that number already: fall back to t1, t2...
+                while 't%d' % j in seen: j += 1
+                o.name = 't%d' % j
+            seen.add(o.name)
 
     # Older maps often link teleporters by plain 0-based index instead of name, and/or
     # write 'from'/'to' with no ':f'/':b' face suffix at all. Handle both.
@@ -657,7 +721,7 @@ def parse(text):
         name, sep, face = ident.rpartition(':')
         if not sep or face.lower() not in ('f', 'b', '*', ''): name, face = ident, default_face  # no face given, or 'inst:tele'
         face = face.lower() or default_face
-        if name.isdigit() and 0 <= int(name) < len(tele_order): name = tele_order[int(name)].name
+        if name.isdigit() and not any(k.name == name for k in tele_order) and 0 <= int(name) < len(tele_order): name = tele_order[int(name)].name   # a name wins over a number
         return name, face
 
     lists = [objs] + list(defines.values())
@@ -694,6 +758,8 @@ def parse(text):
             unshared = lambda ds: all(uses.get(d, 0) == 1 for d in ds)
             ok = bool(tgts) and (schain == tchain or (unshared(sdefs) and unshared(tdefs) and places(tplain) == 1))
         if not ok: raw.append((f, t)); continue
+        if any((o.link if fface == 'f' else o.blink) for o in srcs):
+            raw.append((f, t)); continue   # a second link from the same face (BZFlag picks one of them at random): keep it as written
         for o in srcs:
             if fface == 'f': o.link, o.lface = (tplain if tchain else tn), tface
             elif fface == 'b': o.blink, o.bface = (tplain if tchain else tn), tface
@@ -701,7 +767,19 @@ def parse(text):
     return nw, objs, materials, defines, extras, options_text, physics, world, texmats
 
 
+# keywords the editor reads in a block; any other line is kept as it is (see Obj.extra)
+OBJ_KEYS = {'name', 'position', 'pos', 'size', 'rotation', 'rot', 'color', 'matref', 'phydrv', 'drivethrough', 'shootthrough', 'passable', 'ricochet'}
+GROUP_KEYS = {'name', 'shift', 'rotation', 'rot', 'scale', 'team', 'tint', 'ricochet', 'drivethrough', 'shootthrough', 'passable', 'matref', 'phydrv'}
+
+
 def obj_block(o):
+    if o.t == 'hardpoint':
+        ln = ['hardpoint']
+        if o.name: ln.append('  name %s' % o.name)
+        ln += ['  pos %s %s %s' % (num(o.x), num(o.y), num(o.z)), '  size %s %s %s' % (num(o.sx), num(o.sy), num(o.sz))]
+        if o.r: ln.append('  rot %s' % num(o.r))   # only when it is turned
+        ln += ['  ' + fl.strip() for fl in o.zflags.splitlines() if fl.strip()]
+        return ln + ['end']
     if o.t == 'zone':
         ln = ['zone']
         if o.name: ln.append('  name %s' % o.name)
@@ -741,7 +819,7 @@ def obj_block(o):
         if o.matref: ln.append('  matref %s' % o.matref)
         if o.phydrv: ln.append('  phydrv %s' % o.phydrv)
         if o.ricochet: ln.append('  ricochet')
-        return ln + ['end']
+        return ln + ['  ' + e.strip() for e in o.extra.splitlines() if e.strip()] + ['end']
     ln = [o.t]
     if o.name and o.t in ('teleporter', 'box', 'pyramid', 'base', 'arc', 'cone'): ln.append('  name %s' % o.name)
     ln += ['  position %s %s %s' % (num(o.x), num(o.y), num(o.z)),
@@ -752,6 +830,7 @@ def obj_block(o):
         if o.angle != 360: ln.append('  angle %s' % num(o.angle))
         if o.ratio: ln.append('  ratio %s' % num(o.ratio))
     if o.t == 'cone': ln.append('  divisions %d' % o.divisions)
+    if o.t == 'teleporter' and o.border >= 0: ln.append('  border %s' % num(o.border))
     if o.t in ('arc', 'cone', 'box', 'pyramid') and o.texsize: ln.append('  texsize %s' % o.texsize)
     if o.t == 'pyramid' and o.flipz: ln.append('  flipz')
     if o.t in ('box', 'pyramid', 'arc', 'cone') and o.phys != 'normal': ln.append('  ' + o.phys)
@@ -765,7 +844,7 @@ def obj_block(o):
         for fk, _ in FACES[o.t]:
             name = o.mats.get(fk) or (fb if o.t == 'arc' else '')
             if name: ln.append('  %s matref %s' % (fk, name))
-    return ln + ['end']
+    return ln + ['  ' + e.strip() for e in o.extra.splitlines() if e.strip()] + ['end']
 
 
 def material_block(m):
@@ -812,7 +891,7 @@ def physics_block(p):
 #   #bzmm-object name="Lamp post" category="Street" description="A tall street lamp"
 # Placing one adds its content to the map as a group instance, so many copies share one definition.
 LIB_TAG = '#bzmm-object'
-LIB_SKIP = ('teleporter', 'zone', 'weapon')  # these only make sense inside one particular map
+LIB_SKIP = ('teleporter', 'zone', 'weapon', 'hardpoint')  # these only make sense inside one particular map
 
 
 def user_library_dir():
@@ -1383,11 +1462,18 @@ class Model(QObject):
         s.objs.append(g)
         return g
 
+    def free_hardpoint_name(s, extra=()):
+        taken = {o.name for o in s.objs if o.t == 'hardpoint'} | {z.name for z in extra}; j = 1
+        while 'hardpoint%d' % j in taken: j += 1
+        return 'hardpoint%d' % j
+
     def add(s, t, x, y):
         if t == 'library': return s.place_library(s.lib_item, x, y) if s.lib_item else None
         o = Obj(t, x, y, 0, *DEF[t]); o.uid = s.nid; s.nid += 1
         if t == 'teleporter':
             o.name = s.free_tele_name()
+        elif t == 'hardpoint':
+            o.name = s.free_hardpoint_name()
         s.objs.append(o); return o
 
     def select(s, o):
@@ -1398,11 +1484,16 @@ class Model(QObject):
         name, because links use it; renaming one also renames every link to it."""
         text = clean_name(text)
         if text == object_name(o): return ''
-        if o.t == 'teleporter':
+        if o.t == 'hardpoint':
+            if not text: return 'A hardpoint needs a name: the plugin tells them apart by name.'
+            if any(k.t == 'hardpoint' and k is not o and k.name == text for k in s.objs): return 'Another hardpoint is already called %s.' % text
+            s.push(); o.name = text
+        elif o.t == 'teleporter':
             if not text: return 'A teleporter needs a name, because links use it.'
             scope = s.objs if any(o is k for k in s.objs) else next((ks for ks in s.defines.values() if any(o is k for k in ks)), s.objs)
             if any(k.t == 'teleporter' and k is not o and k.name == text for k in scope): return 'Another teleporter is already called %s.' % text
             s.push(); old = o.name; o.name = text
+            s.world['rawlinks'] = [(rename_in_link(f, old, text), rename_in_link(t, old, text)) for f, t in s.world.get('rawlinks', [])]
             for lst in [s.objs] + list(s.defines.values()):
                 for k in lst:
                     if k.t == 'teleporter':
@@ -1461,6 +1552,8 @@ class Model(QObject):
             if q.t not in ('teleporter', 'group'): q.name = ''   # a copy gets its own name, not a second one with the same name
             if q.t == 'teleporter':
                 q.name = s.free_tele_name(created)
+            elif q.t == 'hardpoint':
+                q.name = s.free_hardpoint_name(created)
             s.objs.append(q); created.append(q)
         s._sync(o, created)
         keep, seenxy = [o], {(round(o.x, 2), round(o.y, 2))}
@@ -1510,7 +1603,7 @@ class Model(QObject):
             q.zteam = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0team))
             z0safe = [_team_inv(o.fam_k, t, mode, fold) for t in o.zsafety]
             q.zsafety = sorted(set(_team_fwd(q.fam_k, t, mode, fold) for t in z0safe))
-            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions'):
+            for f in ('z', 'sx', 'sy', 'sz', 'angle', 'ratio', 'divisions', 'border'):
                 setattr(q, f, getattr(o, f))
             # matref, mats, phydrv, tint and ricochet are deliberately NOT copied here: each
             # symmetry copy keeps its own material, physics driver, tint and ricochet, so a
@@ -1588,6 +1681,8 @@ class Model(QObject):
         if c.t not in ('teleporter', 'group'): c.name = ''
         if c.t == 'teleporter':
             c.name = s.free_tele_name()
+        elif c.t == 'hardpoint':
+            c.name = s.free_hardpoint_name()
         s.objs.append(c); s.make_family(c); s.select(c); s.changed.emit()
 
     def make_group(s, objs, name_hint='group'):
@@ -1612,7 +1707,7 @@ class Model(QObject):
         group's prefab, converting it into the group's local frame (undoing the group's own scale,
         rotation and shift) so it doesn't visually move. Returns False if that isn't possible,
         including when it would make a prefab contain itself."""
-        if grp.t != 'group' or obj is grp or obj not in s.objs: return False
+        if grp.t != 'group' or obj is grp or obj not in s.objs or obj.t == 'hardpoint': return False
         if obj.t == 'group' and s.define_contains(obj.name, grp.name): return False
         a = math.radians(-grp.r); c, sn = math.cos(a), math.sin(a)
         dx, dy = obj.x - grp.x, obj.y - grp.y
@@ -1636,6 +1731,9 @@ class Model(QObject):
         the others are added into it. Otherwise everything selected (groups included, since groups
         nest) is wrapped into a single new prefab + group instance at its centroid."""
         sel = s.msel or ([s.sel] if s.sel else [])
+        if any(o.t == 'hardpoint' for o in sel):
+            s.warn.emit('Hardpoints stay at the top level of the map, so the plugin finds them: they were left out of the group.')
+            sel = [o for o in sel if o.t != 'hardpoint']
         groups = [o for o in sel if o.t == 'group']; plain = [o for o in sel if o.t != 'group']
         if not sel: return None
         s.push()
@@ -1795,6 +1893,8 @@ HINT = {'select': 'Click to select and drag to move. Ctrl+click to multi-select 
         'zone': 'Drag corner to corner, or click for a default zone. Set spawn teams, safety teams and '
                 'flags in the panel -- zones are invisible in the real game, shown here as a checkered '
                 'aid colored by which teams spawn there.',
+        'hardpoint': 'Drag corner to corner, or click for a default hardpoint. Each one is a named, box-shaped area for the hardpoint plugin; '
+                     'Shift+drag turns it, and the Name box renames it. It is invisible in the real game, so add a visible box or mesh over it if you want players to see it.',
         'weapon': 'Click to place a world weapon. Rotation sets its aim direction, Tilt its vertical aim; '
                   'set what it fires and how often in the panel. Shown here as an arrow, since it has no '
                   'appearance in the real game either.'}
@@ -1868,6 +1968,12 @@ class Editor(QWidget):
                 p.setBrush(QColor('#f6f5f0')); p.drawEllipse(QRectF(-leaf.sx * ir, -leaf.sy * ir, 2 * leaf.sx * ir, 2 * leaf.sy * ir))
             if leaf.t == 'cone':
                 p.setPen(cpen('#22262b')); p.drawEllipse(QRectF(-leaf.sx * .12, -leaf.sy * .12, leaf.sx * .24, leaf.sy * .24))
+        elif leaf.t == 'hardpoint':
+            # Invisible in the game; an editor marker: a see-through amber box with a cross (its name is written beside the centre below).
+            fill = QColor(COL['hardpoint']); fill.setAlpha(70)
+            p.setPen(cpen(COL['hardpoint'], 2, Qt.PenStyle.DashLine)); p.setBrush(fill)
+            p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
+            p.setPen(cpen(COL['hardpoint'], 1.2)); p.drawLine(QPointF(-leaf.sx, -leaf.sy), QPointF(leaf.sx, leaf.sy)); p.drawLine(QPointF(-leaf.sx, leaf.sy), QPointF(leaf.sx, -leaf.sy))
         elif leaf.t == 'zone':
             # Zones are invisible in the actual game -- this checkerboard is an editor aid only,
             # one color per spawning team (0=rogue=black), so you can see coverage at a glance.
@@ -1959,6 +2065,8 @@ class Editor(QWidget):
                 if o.t == 'teleporter':
                     p.drawText(QPointF(s.width() / 2 + s.v[0] + (o.x + o.sx + 3 / S) * S,
                                         s.height() / 2 + s.v[1] - o.y * S), o.name)
+                elif o.t == 'hardpoint':
+                    p.drawText(QPointF(s.width() / 2 + s.v[0] + o.x * S + 7, s.height() / 2 + s.v[1] - o.y * S - 7), o.name)
         p.resetTransform(); s.draw_compass(p)
 
     def draw_compass(s, p):
@@ -1993,7 +2101,7 @@ class Editor(QWidget):
             m.select(o)
             if o: m.push(); s.drag = ('move', o, o.x - wx, o.y - wy)
             else: s.drag = pan
-        elif s.m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone'):
+        elif s.m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone', 'hardpoint'):
             a = (s.sn(wx), s.sn(wy)); s.drag = ['make', a, a, p.x(), p.y()]
         else:
             m.push(); o = m.add(s.m.tool, s.sn(wx), s.sn(wy)); m.make_family(o); m.select(o); m.changed.emit()
@@ -3739,6 +3847,271 @@ def choose_lod(ms_full, ms_half, budget=70.0):
     return 2
 
 
+# ---------------------------------------------------------------------------
+# OpenGL renderer
+# ---------------------------------------------------------------------------
+# The numpy renderer turns the face list from Preview.solids() into pixels. This does the same job on the GPU: build_gl_scene() turns
+# the same face list into vertex arrays (lit and textured exactly as the numpy path does), view_proj_matrix() gives the camera of
+# Preview.proj(), and GLCanvas draws them. Picking, the camera, labels and outlines stay in Preview; the outlines and labels are
+# painted by PreviewOverlay, a see-through layer above the canvas.
+GL_VERTEX_FLOATS = 9   # x y z  r g b a  u v
+
+SOFTWARE_GL_NAMES = ('llvmpipe', 'softpipe', 'software rasterizer', 'swrast', 'gdi generic', 'apple software renderer')
+
+
+def gl_is_software(renderer):
+    """True if the OpenGL renderer string names software emulation on the CPU (Mesa's llvmpipe and friends). The numpy renderer is
+    as good as that, so Automatic mode doesn't use it; choosing OpenGL by hand still does."""
+    r = (renderer or '').lower()
+    return any(n in r for n in SOFTWARE_GL_NAMES)
+
+
+def view_proj_matrix(B, w, h, far=20000.0, near=5.0):
+    """4 x 4 matrix (row-major, float32) taking a world point to OpenGL clip space with the same camera as Preview.proj():
+    the same eye position and axes, the same field of view (vertical scale 1.8 = h * 0.9 / (h / 2)), and a near plane at 5."""
+    pos, f, r, u = B
+    dot = lambda a, b: a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    view = np.array([[r[0], r[1], r[2], -dot(r, pos)],
+                     [u[0], u[1], u[2], -dot(u, pos)],
+                     [-f[0], -f[1], -f[2], dot(f, pos)],
+                     [0, 0, 0, 1]], dtype=np.float64)
+    fy = 1.8; fx = 1.8 * h / max(w, 1)
+    proj = np.array([[fx, 0, 0, 0], [0, fy, 0, 0],
+                     [0, 0, (far + near) / (near - far), 2 * far * near / (near - far)], [0, 0, -1, 0]], dtype=np.float64)
+    return np.ascontiguousarray((proj @ view).astype(np.float32))
+
+
+def build_gl_scene(faces, matof, deftex, faceuv, materials, show_textures, light, texture_for_material, texture_for_default):
+    """Vertex data for the GPU from Preview.solids() faces, lit and textured the way render_buffers does it.
+    Returns a dict: 'opaque' {texture key: float32 array (n, 9)}, 'trans' float32 array (t, 3, 9) of the see-through triangles,
+    'trans_keys' [texture key per see-through triangle], 'textures' {key: rows x cols x 3 array}. A texture key is None (flat colour)
+    or id(array). Each vertex is x y z, r g b a (0..1) and u v."""
+    L = math.sqrt(sum(x * x for x in light))
+    opaque, trans, trans_keys, textures = {}, [], [], {}
+    for pts, col, o, tex in faces:
+        alpha = (col.alpha() or 255) / 255.0
+        is_opaque = alpha >= 250 / 255.0
+        texarr = None
+        if show_textures:
+            name = matof.get(id(col))
+            if name and name in materials: texarr = texture_for_material(materials[name].texture)
+            elif id(col) in deftex: texarr = texture_for_default(deftex[id(col)])
+        key = None
+        if texarr is not None: key = id(texarr); textures[key] = texarr
+        n = len(pts)
+        corners = ((0, 1, 2),) if n <= 3 else [(0, i, i + 1) for i in range(1, n - 1)]
+        for ia, ib, ic in corners:
+            a, b_, c = pts[ia], pts[ib], pts[ic]
+            u = (b_[0] - a[0], b_[1] - a[1], b_[2] - a[2]); w_ = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+            nx, ny, nz = u[1] * w_[2] - u[2] * w_[1], u[2] * w_[0] - u[0] * w_[2], u[0] * w_[1] - u[1] * w_[0]
+            nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1
+            lit = abs(nx * light[0] + ny * light[1] + nz * light[2]) / (nl * L)
+            if texarr is not None:
+                fr = faceuv.get(id(col))
+                uvs = span_uvs((a, b_, c), *fr) if fr else planar_uvs((a, b_, c))
+                shade = .75 + .25 * lit; rgba = (shade, shade, shade, alpha)   # a texture is only lightly shaded
+            else:
+                k = .5 + .5 * lit; uvs = ((0.0, 0.0),) * 3
+                rgba = (col.red() * k / 255.0, col.green() * k / 255.0, col.blue() * k / 255.0, alpha)
+            tri = [(p[0], p[1], p[2]) + rgba + (uv[0], uv[1]) for p, uv in zip((a, b_, c), uvs)]
+            if is_opaque: opaque.setdefault(key, []).append(tri)
+            else: trans.append(tri); trans_keys.append(key)
+    return {'opaque': {k: np.array(v, dtype=np.float32).reshape(-1, GL_VERTEX_FLOATS) for k, v in opaque.items()},
+            'trans': np.array(trans, dtype=np.float32).reshape(-1, 3, GL_VERTEX_FLOATS), 'trans_keys': trans_keys, 'textures': textures}
+
+
+def gl_ground_vertices(W):
+    """The ground square and its 50-unit grid as (n, 9) vertices: (triangles, lines)."""
+    g = (0x2f / 255.0, 0x3b / 255.0, 0x33 / 255.0, 1.0); ln = (0x3d / 255.0, 0x4b / 255.0, 0x41 / 255.0, 1.0)
+    P = lambda x, y, c: (x, y, 0.0) + c + (0.0, 0.0)
+    tris = np.array([P(-W, -W, g), P(W, -W, g), P(W, W, g), P(-W, -W, g), P(W, W, g), P(-W, W, g)], dtype=np.float32)
+    lines = []; v = -W
+    while v <= W + .01:
+        lines += [P(v, -W, ln), P(v, W, ln), P(-W, v, ln), P(W, v, ln)]; v += 50
+    return tris, np.array(lines, dtype=np.float32).reshape(-1, GL_VERTEX_FLOATS)
+
+
+class GLCanvas(QOpenGLWidget):
+    """The 3D view drawn on the GPU. A child of Preview that covers it and ignores the mouse, so Preview keeps handling every click,
+    drag and key. If OpenGL can't be set up, or a draw fails, it tells Preview, which goes back to the numpy renderer."""
+    VERT = """#version 120
+uniform mat4 uMVP;
+attribute vec3 aPos;
+attribute vec4 aCol;
+attribute vec2 aUV;
+varying vec4 vCol;
+varying vec2 vUV;
+void main() { gl_Position = uMVP * vec4(aPos, 1.0); vCol = aCol; vUV = aUV; }
+"""
+    FRAG = """#version 120
+uniform sampler2D uTex;
+uniform float uUseTex;
+varying vec4 vCol;
+varying vec2 vUV;
+void main() {
+    vec4 c = vCol;
+    if (uUseTex > 0.5) { c = vec4(texture2D(uTex, vUV).rgb * vCol.rgb, vCol.a); }
+    gl_FragColor = c;
+}
+"""
+
+    def __init__(s, pv):
+        super().__init__(pv)
+        s.pv, s.ok, s.info = pv, False, ''
+        s.prog = None; s.vbos = {}; s.tex = {}; s.dyn = None; s.scene = None; s.scene_key = None
+        s.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True); s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        fmt = QSurfaceFormat(); fmt.setDepthBufferSize(24); fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        s.setFormat(fmt)
+
+    # -- setup --
+    def initializeGL(s):
+        try:
+            ver = (GL.glGetString(GL.GL_VERSION) or b'').decode('ascii', 'replace')
+            ren = (GL.glGetString(GL.GL_RENDERER) or b'').decode('ascii', 'replace')
+            m = re.match(r'\s*(\d+)\.(\d+)', ver)
+            if not m or (int(m.group(1)), int(m.group(2))) < (2, 1): raise RuntimeError('needs OpenGL 2.1 or newer, this is %r' % ver)
+            if s.pv.renderer_pref == 'auto' and gl_is_software(ren):   # emulated on the CPU: no faster than numpy, so leave it alone
+                s._fail('The OpenGL here is software emulation (%s), which is no faster than the built-in renderer.' % ren); return
+            vs, fs = s._shader(GL.GL_VERTEX_SHADER, s.VERT), s._shader(GL.GL_FRAGMENT_SHADER, s.FRAG)
+            prog = GL.glCreateProgram(); GL.glAttachShader(prog, vs); GL.glAttachShader(prog, fs)
+            for loc, nm in ((0, 'aPos'), (1, 'aCol'), (2, 'aUV')): GL.glBindAttribLocation(prog, loc, nm)
+            GL.glLinkProgram(prog)
+            if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS): raise RuntimeError('link: ' + GL.glGetProgramInfoLog(prog).decode('utf-8', 'replace'))
+            s.prog = prog
+            s.u_mvp, s.u_tex, s.u_use = (GL.glGetUniformLocation(prog, n) for n in ('uMVP', 'uTex', 'uUseTex'))
+            s.dyn = GL.glGenBuffers(1)
+            s.ok = True; s.info = 'OpenGL %s on %s' % (ver, ren)
+            QTimer.singleShot(0, lambda: s.pv.m.warn.emit('3D renderer: ' + s.info))
+        except Exception as e:
+            s._fail('OpenGL could not be set up (%s).' % e)
+
+    def _shader(s, kind, text):
+        sh = GL.glCreateShader(kind); GL.glShaderSource(sh, text); GL.glCompileShader(sh)
+        if not GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS): raise RuntimeError('shader: ' + GL.glGetShaderInfoLog(sh).decode('utf-8', 'replace'))
+        return sh
+
+    def _fail(s, msg):
+        s.ok = False
+        QTimer.singleShot(0, lambda: s.pv.gl_failed(msg))
+
+    # -- the scene --
+    def selected_faces(s):
+        sel = s.pv.m.sel
+        return [pts for pts, c, o, t in (s.scene['faces'] if s.scene else []) if o is sel] if sel else []
+
+    def _texture_for_material(s, name): return s.pv.m.texture_array(name)
+
+    def _scene(s):
+        pv = s.pv; key = (pv._scene_ver, pv.show_textures)
+        if s.scene is not None and s.scene_key == key: return s.scene
+        faces = pv.solids()   # also sets pv._matof, pv._deftex and pv._faceuv
+        sc = build_gl_scene(faces, pv._matof, pv._deftex, pv._faceuv, pv.m.materials, pv.show_textures, pv.LIGHT,
+                            s._texture_for_material, default_texture)
+        sc['faces'] = faces
+        for vbo in s.vbos.values(): GL.glDeleteBuffers(1, [vbo[0]])
+        s.vbos = {}
+        for k, arr in sc['opaque'].items():
+            vbo = GL.glGenBuffers(1); GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, arr.nbytes, arr, GL.GL_STATIC_DRAW); s.vbos[k] = (vbo, len(arr))
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        # a texture whose picture arrived or changed gets a new array, so its id changes: textures not used any more are dropped
+        for k in [k for k in s.tex if k not in sc['textures']]: GL.glDeleteTextures([s.tex.pop(k)[0]])
+        s.scene, s.scene_key = sc, key
+        return sc
+
+    def _bind_texture(s, key, arr):
+        if key is None: GL.glUniform1f(s.u_use, 0.0); return
+        ent = s.tex.get(key)
+        if ent is None:
+            tid = GL.glGenTextures(1); GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            for pname, val in ((GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST), (GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST),
+                               (GL.GL_TEXTURE_WRAP_S, GL.GL_REPEAT), (GL.GL_TEXTURE_WRAP_T, GL.GL_REPEAT)):
+                GL.glTexParameteri(GL.GL_TEXTURE_2D, pname, val)
+            h, w = arr.shape[:2]
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB, w, h, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, np.ascontiguousarray(arr, dtype=np.uint8))
+            s.tex[key] = ent = (tid, arr)   # keeping the array alive keeps its id() unique
+        GL.glActiveTexture(GL.GL_TEXTURE0); GL.glBindTexture(GL.GL_TEXTURE_2D, ent[0])
+        GL.glUniform1i(s.u_tex, 0); GL.glUniform1f(s.u_use, 1.0)
+
+    def _attribs(s):
+        stride = GL_VERTEX_FLOATS * 4
+        for loc, size, off in ((0, 3, 0), (1, 4, 12), (2, 2, 28)):
+            GL.glEnableVertexAttribArray(loc); GL.glVertexAttribPointer(loc, size, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(off))
+
+    def _draw_dynamic(s, arr, mode):
+        """Draw (n, 9) vertices from an array made this frame."""
+        if len(arr) == 0: return
+        arr = np.ascontiguousarray(arr, dtype=np.float32)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, s.dyn); GL.glBufferData(GL.GL_ARRAY_BUFFER, arr.nbytes, arr, GL.GL_DYNAMIC_DRAW)
+        s._attribs(); GL.glDrawArrays(mode, 0, len(arr))
+
+    # -- one frame --
+    def paintGL(s):
+        if not s.ok: return
+        try: s._frame()
+        except Exception as e:
+            s._fail('OpenGL drawing failed (%s).' % e)
+
+    def _frame(s):
+        pv = s.pv; B = pv.basis(); pos, f, r, u = B
+        dpr = s.devicePixelRatioF(); w, h = max(1, s.width()), max(1, s.height())
+        GL.glViewport(0, 0, max(1, int(w * dpr)), max(1, int(h * dpr)))
+        GL.glClearColor(0x1b / 255.0, 0x20 / 255.0, 0x26 / 255.0, 1.0); GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        sc = s._scene()
+        far = max(5000.0, pv.dist * 4 + 4 * pv.m.W)
+        mvp = view_proj_matrix(B, w, h, far)
+        GL.glUseProgram(s.prog); GL.glUniformMatrix4fv(s.u_mvp, 1, GL.GL_TRUE, mvp)
+        # ground and grid: under everything, never in the way of the depth test
+        GL.glDisable(GL.GL_DEPTH_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glDisable(GL.GL_BLEND); GL.glUniform1f(s.u_use, 0.0)
+        tris, lines = gl_ground_vertices(pv.m.W)
+        s._draw_dynamic(tris, GL.GL_TRIANGLES); s._draw_dynamic(lines, GL.GL_LINES)
+        # opaque faces, back faces culled like the numpy path does
+        GL.glEnable(GL.GL_DEPTH_TEST); GL.glDepthFunc(GL.GL_LEQUAL); GL.glDepthMask(GL.GL_TRUE)
+        GL.glEnable(GL.GL_CULL_FACE); GL.glCullFace(GL.GL_BACK); GL.glFrontFace(GL.GL_CCW)
+        for key, (vbo, count) in s.vbos.items():
+            s._bind_texture(key, sc['textures'].get(key))
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo); s._attribs(); GL.glDrawArrays(GL.GL_TRIANGLES, 0, count)
+        # see-through faces, farthest first, both sides, without writing depth
+        trans = sc['trans']
+        if len(trans):
+            cent = trans[:, :, :3].mean(axis=1)
+            depth = (cent[:, 0] - pos[0]) * f[0] + (cent[:, 1] - pos[1]) * f[1] + (cent[:, 2] - pos[2]) * f[2]
+            order = np.argsort(-depth)
+            keys = [sc['trans_keys'][i] for i in order]; arr = trans[order].reshape(-1, GL_VERTEX_FLOATS)
+            GL.glEnable(GL.GL_BLEND); GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ONE, GL.GL_ONE_MINUS_SRC_ALPHA)   # keep the canvas fully opaque
+            GL.glDepthMask(GL.GL_FALSE); GL.glDisable(GL.GL_CULL_FACE)
+            i = 0
+            while i < len(keys):   # one draw call per run of triangles that share a texture
+                j = i
+                while j < len(keys) and keys[j] == keys[i]: j += 1
+                s._bind_texture(keys[i], sc['textures'].get(keys[i]))
+                chunk = np.ascontiguousarray(arr[i * 3:j * 3], dtype=np.float32)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, s.dyn); GL.glBufferData(GL.GL_ARRAY_BUFFER, chunk.nbytes, chunk, GL.GL_DYNAMIC_DRAW)
+                s._attribs(); GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(chunk))
+                i = j
+        # leave the state the way Qt's own painting expects it
+        for loc in (0, 1, 2): GL.glDisableVertexAttribArray(loc)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0); GL.glBindTexture(GL.GL_TEXTURE_2D, 0); GL.glUseProgram(0)
+        GL.glDepthMask(GL.GL_TRUE); GL.glDisable(GL.GL_DEPTH_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glDisable(GL.GL_BLEND)
+
+
+class PreviewOverlay(QWidget):
+    """The see-through layer above GLCanvas: the selection outline, markers, flight paths, weapon arrows, hints and the axis gizmo,
+    painted by the same code the numpy renderer uses (Preview._paint_overlays)."""
+
+    def __init__(s, pv):
+        super().__init__(pv)
+        s.pv = pv
+        s.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True); s.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(s, _):
+        pv = s.pv
+        p = QPainter(s); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pv._paint_overlays(p, pv.basis(), pv.gl.selected_faces() if pv.gl is not None else [])
+
+
 class Preview(QWidget):
     LIGHT = (.4, -.5, .77)
 
@@ -3754,7 +4127,50 @@ class Preview(QWidget):
         s._hires_timer.setSingleShot(True)
         s._hires_timer.timeout.connect(s._finish_lod)
         s.setMinimumSize(320, 240); s.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        m.changed.connect(s.update); m.selected.connect(s.update)
+        s.gl = s.ov = None          # GLCanvas and PreviewOverlay while the OpenGL renderer is in use
+        s.renderer_pref, s._scene_ver = 'software', 0
+        m.changed.connect(s._scene_dirty); m.changed.connect(s.update); m.selected.connect(s.update)
+
+    def _scene_dirty(s): s._scene_ver += 1   # the map changed: the GPU copy of the scene is rebuilt on the next frame
+
+    def update(s):
+        super().update()
+        if s.gl is not None: s.gl.update(); s.ov.update()
+
+    def resizeEvent(s, e):
+        super().resizeEvent(e)
+        for w in (s.gl, s.ov):
+            if w is not None: w.setGeometry(s.rect())
+
+    def renderer_name(s):
+        return 'OpenGL' if s.gl is not None else 'software (numpy)'
+
+    def set_renderer(s, pref):
+        """'auto' or 'opengl': draw with the GPU when OpenGL is there and works, else (and for 'software') with numpy."""
+        s.renderer_pref = pref
+        if pref == 'software':
+            s._stop_gl(); return
+        if not GL_OK:
+            s._stop_gl()
+            if pref == 'opengl': s.m.warn.emit('OpenGL is not available (%s): using the software renderer.' % GL_IMPORT_ERROR)
+            return
+        if s.gl is None:
+            s.gl = GLCanvas(s); s.ov = PreviewOverlay(s)
+            for w in (s.gl, s.ov): w.setGeometry(s.rect()); w.show()
+            s.ov.raise_()
+        s.update()
+
+    def _stop_gl(s):
+        for w in (s.gl, s.ov):
+            if w is not None: w.hide(); w.deleteLater()
+        had = s.gl is not None
+        s.gl = s.ov = None
+        if had: s.update()
+
+    def gl_failed(s, msg):
+        """The OpenGL canvas could not be set up or drew badly: back to numpy, and say why."""
+        s._stop_gl(); s.renderer_pref = 'software'
+        s.m.warn.emit(msg + ' Using the software renderer.')
 
     def basis(s):
         cp = math.cos(s.pitch); n = s.dist
@@ -3801,6 +4217,8 @@ class Preview(QWidget):
             col = QColor(TEAM[o.team] if o.t == 'base' else COL.get(o.t, '#8d939a'))
             C = lambda face, o=o, col=col: s.face_color(o, face, col)
             z0 = o.z; z1 = z0 + max(o.sz, .3)
+            if o.t == 'hardpoint':
+                F += s.hardpoint_faces(o); continue
             if o.t == 'zone':
                 if s.m.show_zones:
                     F += s.zone_faces(o, P, z1)
@@ -3861,6 +4279,22 @@ class Preview(QWidget):
                 quad = [P(x0, y0, ztop), P(x0 + cw, y0, ztop), P(x0 + cw, y0 + ch, ztop), P(x0, y0 + ch, ztop)]
                 F.append((quad, col, o, None))
         return F
+
+    def hardpoint_faces(s, o):
+        """A hardpoint is invisible in the game (the plugin only knows its name, box and rotation), so here it is a see-through amber
+        box to show where it is and how big."""
+        a = math.radians(o.r); c, sn = math.cos(a), math.sin(a)
+        P = lambda lx, ly, z: (o.x + lx * c - ly * sn, o.y + lx * sn + ly * c, z)
+        z0, z1 = o.z, o.z + max(o.sz, .3)
+        col = QColor(COL['hardpoint']); col.setAlpha(95)
+        x0, x1, y0, y1 = -o.sx, o.sx, -o.sy, o.sy
+        quads = [[P(x0, y0, z0), P(x0, y1, z0), P(x1, y1, z0), P(x1, y0, z0)],     # bottom (faces down)
+                 [P(x0, y0, z1), P(x1, y0, z1), P(x1, y1, z1), P(x0, y1, z1)],     # top
+                 [P(x0, y0, z0), P(x1, y0, z0), P(x1, y0, z1), P(x0, y0, z1)],     # south
+                 [P(x1, y0, z0), P(x1, y1, z0), P(x1, y1, z1), P(x1, y0, z1)],     # east
+                 [P(x1, y1, z0), P(x0, y1, z0), P(x0, y1, z1), P(x1, y1, z1)],     # north
+                 [P(x0, y1, z0), P(x0, y0, z0), P(x0, y0, z1), P(x0, y1, z1)]]     # west
+        return [(q, QColor(col), o, None) for q in quads]
 
     def face_color(s, o, face, default):
         """Color of one face: its own material, else the object's all-faces material, else default."""
@@ -3976,6 +4410,7 @@ class Preview(QWidget):
         return zbuf, cbuf, sel_faces
 
     def paintEvent(s, _):
+        if s.gl is not None: return   # the OpenGL canvas and its overlay draw the view
         p = QPainter(s); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(s.rect(), QColor('#1b2026')); B = s.basis(); h = s.m.W
 
@@ -4005,6 +4440,14 @@ class Preview(QWidget):
         ms = (time.perf_counter() - t0) * 1000  # remembered so choose_lod can tell whether pixelating pays
         if lod in (1, 2): s._ms[lod] = ms if lod not in s._ms else .6 * s._ms[lod] + .4 * ms
         p.drawImage(0, 0, img)
+        s._paint_overlays(p, B, sel_faces)
+
+    def _paint_overlays(s, p, B, sel_faces):
+        """Everything painted over the 3D picture with QPainter: the selection outline, markers, paths, hints and the gizmo."""
+        def poly(pts):
+            q = [s.proj(B, v) for v in pts]
+            return None if None in q else QPolygonF(q)
+
         for pts in sel_faces:  # outline the selected object on top of the rasterized image
             pg = poly(pts)
             if pg: p.setPen(QPen(ACC.lighter(150), 2)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPolygon(pg)
@@ -4130,7 +4573,7 @@ class Preview(QWidget):
             m.select(o)
             if o: m.push(); s.act = ('move', o, o.z)
             else: s.act = None
-        elif m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone'):
+        elif m.tool in ('box', 'pyramid', 'arc', 'cone', 'zone', 'hardpoint'):
             hit = ray_ground(*s.ray(p))
             if hit:
                 a = (s.sn(hit[0]), s.sn(hit[1])); s.act = ('make', a, a, p)
@@ -5284,8 +5727,14 @@ class Win(QMainWindow):
         rt.setToolTip('Download the http:// textures a map uses in the background so the 3D view can show them')
         rt.setChecked(s.settings.value('remoteTextures', 'true') != 'false'); s.m.remote_textures = rt.isChecked()
         rt.toggled.connect(s.set_remote_textures); vw.addAction(rt)
+        rm = vw.addMenu('3D Renderer'); rg = QActionGroup(s)
+        cur_r = os.environ.get('BZMM_RENDERER') or s.settings.value('renderer', 'auto')
+        for key, label in (('auto', 'Automatic: OpenGL on real graphics hardware, else software'), ('opengl', 'OpenGL (even if it is emulated)'), ('software', 'Software (numpy)')):
+            ra = QAction(label, s); ra.setCheckable(True); ra.setChecked(key == cur_r)
+            ra.triggered.connect(lambda _, k=key: s.set_renderer(k)); rg.addAction(ra); rm.addAction(ra)
+        s.pv.set_renderer(cur_r)
         tb = s.addToolBar('Tools'); g = QActionGroup(s)
-        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon'):
+        for t in ('select', 'box', 'pyramid', 'base', 'teleporter', 'arc', 'cone', 'zone', 'weapon', 'hardpoint'):
             a = QAction(t.capitalize(), s); a.setCheckable(True); a.setChecked(t == 'select')
             a.triggered.connect(lambda _, t=t: setattr(s.m, 'tool', t)); g.addAction(a); tb.addAction(a)
         s.lib_action = QAction('Custom object', s); s.lib_action.setCheckable(True); s.lib_action.setEnabled(False)
@@ -5328,6 +5777,10 @@ class Win(QMainWindow):
         s.div = QSpinBox(); s.div.setRange(3, 64); s.div.valueChanged.connect(lambda v: s.edit('divisions', v))
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
+        s.border = QDoubleSpinBox(); s.border.setRange(-1.0, 50.0); s.border.setDecimals(2); s.border.setSingleStep(.1)
+        s.border.setSpecialValueText('default (1.12)')   # the bottom of the range, -1, means not set
+        s.border.setToolTip('Width of the teleporter frame (the BZW border line). Leave it at default and nothing is written, so BZFlag uses its own 1.12.')
+        s.border.valueChanged.connect(lambda v: s.edit('border', v))
         s.mat = QComboBox(); s.mat.setEditable(True); s.mat.currentTextChanged.connect(lambda t: s.edit('matref', t))
         s.texsize = QLineEdit()
         s.texsize.setToolTip('How big one texture tile is. Box, pyramid and arc: 4 numbers, cone: 2 numbers. A negative number is the tile size in '
@@ -5373,7 +5826,7 @@ class Win(QMainWindow):
         s.member_combo = QComboBox(); s.member_combo.currentIndexChanged.connect(s.pick_member)
         fl.addRow('Edit member', s.member_combo)
         fl.addRow('Front links to', s.link_row); fl.addRow('Back links to', s.blink_row)
-        fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat)
+        fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat); fl.addRow('Border size', s.border)
         fl.addRow(s.flip); fl.addRow('Passability', s.phys); fl.addRow(s.ricochet)
         fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('', s.mirror_phys_btn)
         fl.addRow('Group tint (RGBA)', s.tint_widget); fl.addRow('', s.match_color_btn)
@@ -5668,7 +6121,7 @@ class Win(QMainWindow):
                 'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
                 'objname': bool(o), 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
-                'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc',
+                'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc', 'border': o and o.t == 'teleporter',
                 'texsize': o and o.t in ('arc', 'cone', 'box', 'pyramid'),
                 'mat': o and o.t in ('box', 'pyramid', 'arc', 'cone'), 'flip': o and o.t == 'pyramid',
                 'phys': o and o.t in ('box', 'pyramid', 'arc', 'cone', 'group'), 'zteam': o and o.t == 'zone',
@@ -5684,7 +6137,7 @@ class Win(QMainWindow):
             widget = {'objname': s.objname, 'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'member_combo': s.member_combo,
-                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'mat': s.mat, 'texsize': s.texsize,
+                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'border': s.border, 'mat': s.mat, 'texsize': s.texsize,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
                       'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
                       'wcolor': s.wcolor, 'tilt': s.tilt, 'initdelay': s.initdelay, 'wdelay': s.wdelay,
@@ -5713,6 +6166,7 @@ class Win(QMainWindow):
                 cb.setCurrentText(cur or 'Nothing')
             s.lfacec.setCurrentIndex(0 if o.lface == 'b' else 1); s.bfacec.setCurrentIndex(0 if o.bface == 'b' else 1)
             s.div.setValue(o.divisions); s.ang.setValue(o.angle if o.angle else 360); s.rat.setValue(o.ratio)
+            s.border.setValue(o.border)
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
             s.objname.setText(object_name(o))
             s.objname.setPlaceholderText(auto_labels(s.m.objs).get(id(o), o.t) if o.t != 'teleporter' else 'teleporter name')
@@ -5820,6 +6274,11 @@ class Win(QMainWindow):
     def set_pv_option(s, key, attr, on):
         """A View-menu choice for the 3D view (edge shading, textures): apply it now and remember it."""
         setattr(s.pv, attr, on); s.settings.setValue(key, 'true' if on else 'false'); s.pv.update()
+
+    def set_renderer(s, key):
+        """View > 3D Renderer: remember the choice and switch now."""
+        s.settings.setValue('renderer', key); s.pv.set_renderer(key)
+        s.statusBar().showMessage('3D renderer: %s' % s.pv.renderer_name(), 8000)
 
     def set_remote_textures(s, on):
         """View > Load Remote Textures Automatically: remember the choice, and when it is turned on, start loading the
