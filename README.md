@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/bzmapmaker-logo.png" alt="BZ Map Maker logo" width="180">
-</p>
+
 
 # BZ Map Maker
 
