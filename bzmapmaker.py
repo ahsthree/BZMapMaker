@@ -103,6 +103,7 @@ class Obj:
     trigger: str = ''; eventteam: int = 1  # weapon only: '' or 'oncap', and which team's cap fires it
     fam: str = ''; fam_k: int = 0; fold: int = 0; mode: str = ''   # symmetry family
     uid: int = 0
+    spawns: tuple = ()  # hardpoint: spawn spots as (dx, dy, z or None), from the hardpoint's centre; written as world x y [z]
     border: float = -1.0  # teleporter: width of its frame; -1 = not set, so BZFlag's own default applies and nothing is written
     extra: str = ''  # lines of its block this editor doesn't know (a teleporter's border...), kept and written back as they are
     texsize: str = ''  # box / pyramid / arc (4 numbers) or cone (2 numbers): BZW 'texsize' as written; '' = BZFlag's default (nothing is written)
@@ -263,6 +264,29 @@ def rename_in_link(ident, old, new):
     i = len(parts) - 2 if len(parts) > 1 and parts[-1].lower() in ('f', 'b', '*', '') else len(parts) - 1
     if 0 <= i < len(parts) and parts[i] == old: parts[i] = new
     return ':'.join(parts)
+
+
+def parse_spawn_lines(text):
+    """[(x, y, z or None)] from lines such as "70 0", "70 0 5" or "spawn 70 0" (world coordinates). Lines that are not 2 or 3 numbers are ignored."""
+    out = []
+    for ln in (text or '').splitlines():
+        p = ln.replace(',', ' ').split()
+        if p and p[0].lower() == 'spawn': p = p[1:]
+        if len(p) in (2, 3):
+            try: v = [float(a) for a in p]
+            except ValueError: continue
+            out.append((v[0], v[1], v[2] if len(v) == 3 else None))
+    return out
+
+
+def spawn_ring(n, radius):
+    """n offsets spaced evenly on a circle of the given radius, starting due east."""
+    return [(radius * math.cos(2 * math.pi * k / n), radius * math.sin(2 * math.pi * k / n)) for k in range(max(1, n))]
+
+
+def spawn_text(o):
+    """A hardpoint's spawn spots as text, one "x y" or "x y z" per line, in world coordinates."""
+    return '\n'.join('%s %s' % (num(o.x + dx), num(o.y + dy)) + ('' if z is None else ' %s' % num(z)) for dx, dy, z in o.spawns)
 
 
 def clean_name(text):
@@ -567,7 +591,7 @@ def parse(text):
         elif k == 'hardpoint':
             # The hardpoint plugin's own map object: a named box-shaped area (name, pos, size). Lines this editor doesn't know are kept as they are.
             body = read_raw_block()
-            name = ''; hx = hy = hz = hr = 0.0; hsx, hsy, hsz = DEF['hardpoint']; other = []
+            name = ''; hx = hy = hz = hr = 0.0; hsx, hsy, hsz = DEF['hardpoint']; other = []; spawns = []
             for ln in body:
                 q = ln.split()
                 if not q: continue
@@ -582,6 +606,9 @@ def parse(text):
                 elif kk in ('rot', 'rotation') and len(q) > 1:
                     try: hr = float(q[1])
                     except Exception: pass
+                elif kk == 'spawn' and len(q) in (3, 4):
+                    try: spawns.append(tuple(float(a) for a in q[1:]))
+                    except ValueError: other.append(ln)
                 else: other.append(ln)
             used = {o.name for o in objs if o.t == 'hardpoint'}
             if not name or name in used:   # every hardpoint needs its own name: the plugin cycles through them by name
@@ -590,6 +617,7 @@ def parse(text):
                 name = 'hardpoint%d' % j
             ho = Obj('hardpoint', hx, hy, hz, hsx, hsy, hsz, hr, 1, name)
             ho.zflags = '\n'.join(other)
+            ho.spawns = tuple((sp[0] - hx, sp[1] - hy, sp[2] if len(sp) == 3 else None) for sp in spawns)   # kept from the centre, so they move with it
             apply_meta(ho, line_meta)
             objs.append(ho)
         elif k == 'weapon':
@@ -778,6 +806,7 @@ def obj_block(o):
         if o.name: ln.append('  name %s' % o.name)
         ln += ['  pos %s %s %s' % (num(o.x), num(o.y), num(o.z)), '  size %s %s %s' % (num(o.sx), num(o.sy), num(o.sz))]
         if o.r: ln.append('  rot %s' % num(o.r))   # only when it is turned
+        for dx, dy, z in o.spawns: ln.append('  spawn %s %s' % (num(o.x + dx), num(o.y + dy)) + ('' if z is None else ' %s' % num(z)))
         ln += ['  ' + fl.strip() for fl in o.zflags.splitlines() if fl.strip()]
         return ln + ['end']
     if o.t == 'zone':
@@ -1597,6 +1626,9 @@ class Model(QObject):
             if q is o: continue
             q.x, q.y, q.r = _xform(q.fam_k, x0, y0, r0, mode, fold)
             q.flipz, q.phys, q.zflags = o.flipz, o.phys, o.zflags
+            if q.t == 'hardpoint':   # its spawn spots turn or mirror with the family, like its position
+                base = [_inv_vec(o.fam_k, (dx, dy, 0.0), mode, fold) for dx, dy, _z in o.spawns]
+                q.spawns = tuple((_xform_vec(q.fam_k, b, mode, fold)[0], _xform_vec(q.fam_k, b, mode, fold)[1], sp[2]) for b, sp in zip(base, o.spawns))
             # a zone's team/safety lists swap or cycle the same way a base's team does, per
             # entry (team 0/rogue is left alone, same rule _team_fwd already applies to bases)
             z0team = [_team_inv(o.fam_k, t, mode, fold) for t in o.zteam]
@@ -1974,6 +2006,13 @@ class Editor(QWidget):
             p.setPen(cpen(COL['hardpoint'], 2, Qt.PenStyle.DashLine)); p.setBrush(fill)
             p.drawRect(QRectF(-leaf.sx, -leaf.sy, 2 * leaf.sx, 2 * leaf.sy))
             p.setPen(cpen(COL['hardpoint'], 1.2)); p.drawLine(QPointF(-leaf.sx, -leaf.sy), QPointF(leaf.sx, leaf.sy)); p.drawLine(QPointF(-leaf.sx, leaf.sy), QPointF(leaf.sx, -leaf.sy))
+            if leaf.spawns:   # spawn spots: green dots with a tick toward the hardpoint (players spawn facing it); in world directions, not turned with the box
+                p.save(); p.rotate(-shape_turn(leaf)); rad = 5 / S
+                p.setPen(cpen('#2f9e44', 1.5)); p.setBrush(QColor(47, 158, 68, 170))
+                for dx, dy, _z in leaf.spawns:
+                    ln_ = math.hypot(dx, dy) or 1.0
+                    p.drawEllipse(QPointF(dx, dy), rad, rad); p.drawLine(QPointF(dx, dy), QPointF(dx - dx / ln_ * rad * 2.6, dy - dy / ln_ * rad * 2.6))
+                p.restore()
         elif leaf.t == 'zone':
             # Zones are invisible in the actual game -- this checkerboard is an editor aid only,
             # one color per spawning team (0=rogue=black), so you can see coverage at a glance.
@@ -4294,7 +4333,15 @@ class Preview(QWidget):
                  [P(x1, y0, z0), P(x1, y1, z0), P(x1, y1, z1), P(x1, y0, z1)],     # east
                  [P(x1, y1, z0), P(x0, y1, z0), P(x0, y1, z1), P(x1, y1, z1)],     # north
                  [P(x0, y1, z0), P(x0, y0, z0), P(x0, y0, z1), P(x0, y1, z1)]]     # west
-        return [(q, QColor(col), o, None) for q in quads]
+        faces = [(q, QColor(col), o, None) for q in quads]
+        for dx, dy, sz in o.spawns:   # a spawn spot: a thin post, so it can be seen and picked out
+            px, py, pz = o.x + dx, o.y + dy, (o.z if sz is None else sz); pc = QColor('#2f9e44'); pc.setAlpha(190); w = 1.2; t = pz + 8.0
+            P2 = lambda x, y, z: (px + x, py + y, z)
+            for q in ([P2(-w, -w, pz), P2(-w, w, pz), P2(w, w, pz), P2(w, -w, pz)], [P2(-w, -w, t), P2(w, -w, t), P2(w, w, t), P2(-w, w, t)],
+                      [P2(-w, -w, pz), P2(w, -w, pz), P2(w, -w, t), P2(-w, -w, t)], [P2(w, -w, pz), P2(w, w, pz), P2(w, w, t), P2(w, -w, t)],
+                      [P2(w, w, pz), P2(-w, w, pz), P2(-w, w, t), P2(w, w, t)], [P2(-w, w, pz), P2(-w, -w, pz), P2(-w, -w, t), P2(-w, w, t)]):
+                faces.append((q, QColor(pc), o, None))
+        return faces
 
     def face_color(s, o, face, default):
         """Color of one face: its own material, else the object's all-faces material, else default."""
@@ -5753,10 +5800,19 @@ class Win(QMainWindow):
 
     def build_panel(s):
         w = QWidget(); fl = QFormLayout(w); s.sp = {}
+        s.spawn_txt = QPlainTextEdit(); s.spawn_txt.setMaximumHeight(110); s.spawn_txt.textChanged.connect(s.edit_spawns)
+        s.spawn_txt.setPlaceholderText('one per line: x y   (or x y z), world coordinates')
+        s.spawn_txt.setToolTip('Where players spawn for this hardpoint (the plugin\'s spawn lines): one spot per line, x y or x y z, in world coordinates. '
+                               'Players spawn at one of them at random, facing the hardpoint. Put them on open ground. With none, the plugin asks the server for safe spots.')
+        ring = QPushButton('Add a ring...'); ring.clicked.connect(s.add_spawn_ring)
+        clr = QPushButton('Clear'); clr.clicked.connect(s.clear_spawns)
+        s.spawn_box = QWidget(); sbl = QVBoxLayout(s.spawn_box); sbl.setContentsMargins(0, 0, 0, 0); sbl.addWidget(s.spawn_txt)
+        sbr = QHBoxLayout(); sbr.addWidget(ring); sbr.addWidget(clr); sbr.addStretch(1); sbl.addLayout(sbr)
         s.objname = QLineEdit(); s.objname.setClearButtonEnabled(True); s.objname.editingFinished.connect(s.edit_objname)
         s.objname.setToolTip('The BZW name of this object, shown in the Objects tab and saved in the map. Leave it blank for no name '
                              '(the list then calls it box1, group1 and so on). Spaces become underscores.')
         fl.addRow('Name', s.objname)
+        fl.addRow('Spawn points', s.spawn_box)
         for k, l in s.FIELDS:
             b = QDoubleSpinBox(); b.setRange(-5000, 5000); b.setDecimals(3); b.setSingleStep(1)
             b.valueChanged.connect(lambda v, k=k: s.edit(k, v)); fl.addRow(l, b); s.sp[k] = b
@@ -6058,6 +6114,39 @@ class Win(QMainWindow):
         if not s.editing_member and k not in ('link', 'blink', 'lface', 'bface', 'name'): s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
+    def show_spawns(s, o):
+        s.busy = True; s.spawn_txt.setPlainText(spawn_text(o) if o.t == 'hardpoint' else ''); s.busy = False
+
+    def edit_spawns(s):
+        """The Spawn points box: every line of 2 or 3 numbers becomes a spawn spot of the hardpoint."""
+        o = s.current_obj()
+        if s.busy or not o or o.t != 'hardpoint': return
+        new = tuple((x - o.x, y - o.y, z) for x, y, z in parse_spawn_lines(s.spawn_txt.toPlainText()))
+        if len(new) == len(o.spawns) and all(abs(a[0] - b[0]) < 1e-3 and abs(a[1] - b[1]) < 1e-3 and a[2] == b[2] for a, b in zip(new, o.spawns)): return
+        if not s.pushed: s.m.push(); s.pushed = True
+        o.spawns = new
+        if not s.editing_member: s.m.sync_family(o)
+        s.busy = True; s.m.changed.emit(); s.busy = False
+
+    def add_spawn_ring(s):
+        o = s.current_obj()
+        if not o or o.t != 'hardpoint': return
+        n, ok = QInputDialog.getInt(s, 'Spawn ring', 'How many spawn points?', 4, 1, 64)
+        if not ok: return
+        r, ok = QInputDialog.getDouble(s, 'Spawn ring', 'Distance from the hardpoint centre:', round(max(o.sx, o.sy) + 40.0, 1), 1.0, 5000.0, 1)
+        if not ok: return
+        s.m.push(); o.spawns = tuple(o.spawns) + tuple((dx, dy, None) for dx, dy in spawn_ring(n, r))
+        if not s.editing_member: s.m.sync_family(o)
+        s.m.changed.emit(); s.show_spawns(o)
+        s.m.warn.emit('Spawn ring added. Check that the spots are on open ground: nothing here checks them against walls and buildings.')
+
+    def clear_spawns(s):
+        o = s.current_obj()
+        if not o or o.t != 'hardpoint' or not o.spawns: return
+        s.m.push(); o.spawns = ()
+        if not s.editing_member: s.m.sync_family(o)
+        s.m.changed.emit(); s.show_spawns(o)
+
     def edit_objname(s):
         """Name box: the object takes the new name when you leave the box or press Enter."""
         o = s.current_obj()
@@ -6119,7 +6208,7 @@ class Win(QMainWindow):
         rows = {'x': True, 'y': True, 'z': True, 'sx': o and o.t not in ('mesh', 'weapon'),
                 'sy': o and o.t not in ('mesh', 'weapon'), 'sz': o and o.t not in ('mesh', 'weapon'),
                 'r': o and o.t != 'mesh', 'team': o and o.t == 'base',
-                'objname': bool(o), 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
+                'objname': bool(o), 'spawns': o and o.t == 'hardpoint', 'gteam': o and o.t == 'group', 'gname': o and o.t == 'group', 'member_combo': grp is not None,
                 'link': o and o.t == 'teleporter', 'blink': o and o.t == 'teleporter',
                 'div': o and o.t in ('arc', 'cone'), 'ang': o and o.t == 'arc', 'rat': o and o.t == 'arc', 'border': o and o.t == 'teleporter',
                 'texsize': o and o.t in ('arc', 'cone', 'box', 'pyramid'),
@@ -6134,7 +6223,7 @@ class Win(QMainWindow):
                 'match_color_btn': o and o.t == 'group' and o.fam,
                 'mirror_phys_btn': o and o.t in ('box', 'pyramid', 'arc', 'cone') and o.fam and o.phydrv}
         for name, vis in rows.items():
-            widget = {'objname': s.objname, 'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
+            widget = {'objname': s.objname, 'spawns': s.spawn_box, 'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'member_combo': s.member_combo,
                       'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'border': s.border, 'mat': s.mat, 'texsize': s.texsize,
@@ -6169,6 +6258,7 @@ class Win(QMainWindow):
             s.border.setValue(o.border)
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
             s.objname.setText(object_name(o))
+            s.show_spawns(o)
             s.objname.setPlaceholderText(auto_labels(s.m.objs).get(id(o), o.t) if o.t != 'teleporter' else 'teleporter name')
             s.texsize.setText(o.texsize if o.t in ('arc', 'cone', 'box', 'pyramid') else '')
             s.texsize.setPlaceholderText({'arc': '4 numbers, e.g. -2 -2 -8 -8 (blank = default)', 'cone': '2 numbers, e.g. -8 -8 (blank = default)',
