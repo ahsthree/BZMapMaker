@@ -6044,10 +6044,13 @@ class Win(QMainWindow):
         s.div = QSpinBox(); s.div.setRange(3, 64); s.div.valueChanged.connect(lambda v: s.edit('divisions', v))
         s.ang = QDoubleSpinBox(); s.ang.setRange(1, 360); s.ang.valueChanged.connect(lambda v: s.edit('angle', v))
         s.rat = QDoubleSpinBox(); s.rat.setRange(0, .95); s.rat.setSingleStep(.05); s.rat.valueChanged.connect(lambda v: s.edit('ratio', v))
-        s.border = QDoubleSpinBox(); s.border.setRange(-1.0, 50.0); s.border.setDecimals(2); s.border.setSingleStep(.1)
-        s.border.setSpecialValueText('default (1.12)')   # the bottom of the range, -1, means not set
-        s.border.setToolTip('Width of the teleporter frame (the BZW border line). Leave it at default and nothing is written, so BZFlag uses its own 1.12.')
-        s.border.valueChanged.connect(lambda v: s.edit('border', v))
+        s.border = QDoubleSpinBox(); s.border.setRange(0.0, 50.0); s.border.setDecimals(2); s.border.setSingleStep(.1)
+        s.border.setSpecialValueText('0 (no border)')   # the bottom of the range: a teleporter with no frame at all
+        s.border.setToolTip('Width of the teleporter frame (the BZW border line). 0 means no border.')
+        s.border.valueChanged.connect(lambda v: s.edit('border', v) if not s.border_def.isChecked() else None)
+        s.border_def = QCheckBox('Default'); s.border_def.setToolTip("Tick to write no border line, so BZFlag uses its own width (1.12). Untick to set the width yourself, down to 0 for no border.")
+        s.border_def.toggled.connect(s.toggle_border_default)
+        s.border_row = QWidget(); brl = QHBoxLayout(s.border_row); brl.setContentsMargins(0, 0, 0, 0); brl.addWidget(s.border_def); brl.addWidget(s.border, 1)
         s.mat = QComboBox(); s.mat.setEditable(True); s.mat.currentTextChanged.connect(lambda t: s.edit('matref', t))
         s.texsize = QLineEdit()
         s.texsize.setToolTip('How big one texture tile is. Box, pyramid and arc: 4 numbers, cone: 2 numbers. A negative number is the tile size in '
@@ -6093,7 +6096,7 @@ class Win(QMainWindow):
         s.member_combo = QComboBox(); s.member_combo.currentIndexChanged.connect(s.pick_member)
         fl.addRow('Edit member', s.member_combo)
         fl.addRow('Front links to', s.link_row); fl.addRow('Back links to', s.blink_row)
-        fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat); fl.addRow('Border size', s.border)
+        fl.addRow('Divisions', s.div); fl.addRow('Sweep angle', s.ang); fl.addRow('Hollow ratio', s.rat); fl.addRow('Border size', s.border_row)
         fl.addRow(s.flip); fl.addRow('Passability', s.phys); fl.addRow(s.ricochet)
         fl.addRow('Physics driver', s.phydrv_combo); fl.addRow('', s.mirror_phys_btn)
         fl.addRow('Group tint (RGBA)', s.tint_widget); fl.addRow('', s.match_color_btn)
@@ -6339,6 +6342,12 @@ class Win(QMainWindow):
         if not s.editing_member: s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
+    def toggle_border_default(s, on):
+        """Border size 'Default' box: ticked writes no border line; unticked sets the width in the box (0 = no border)."""
+        s.border.setEnabled(not on)
+        if s.busy: return
+        s.edit('border', -1.0 if on else float(s.border.value()))
+
     def toggle_spawn_click(s, on):
         """'Click map to add': while it is down, clicks on the 2D map add spawn spots to the selected hardpoint."""
         if s.busy: return
@@ -6459,7 +6468,7 @@ class Win(QMainWindow):
             widget = {'objname': s.objname, 'spawns': s.spawn_box, 'x': s.sp['x'], 'y': s.sp['y'], 'z': s.sp['z'], 'sx': s.sp['sx'], 'sy': s.sp['sy'],
                       'sz': s.sp['sz'], 'r': s.sp['r'], 'team': s.team, 'gteam': s.gteam, 'gname': s.gname,
                       'member_combo': s.member_combo,
-                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'border': s.border, 'mat': s.mat, 'texsize': s.texsize,
+                      'link': s.link_row, 'blink': s.blink_row, 'div': s.div, 'ang': s.ang, 'rat': s.rat, 'border': s.border_row, 'mat': s.mat, 'texsize': s.texsize,
                       'flip': s.flip, 'phys': s.phys, 'zteam': s.zteam, 'zsafety': s.zsafety,
                       'zflags': s.zflags, 'ricochet': s.ricochet, 'phydrv_combo': s.phydrv_combo,
                       'wcolor': s.wcolor, 'tilt': s.tilt, 'initdelay': s.initdelay, 'wdelay': s.wdelay,
@@ -6488,7 +6497,8 @@ class Win(QMainWindow):
                 cb.setCurrentText(cur or 'Nothing')
             s.lfacec.setCurrentIndex(0 if o.lface == 'b' else 1); s.bfacec.setCurrentIndex(0 if o.bface == 'b' else 1)
             s.div.setValue(o.divisions); s.ang.setValue(o.angle if o.angle else 360); s.rat.setValue(o.ratio)
-            s.border.setValue(o.border)
+            s.busy = True; s.border_def.setChecked(o.border < 0); s.border.setEnabled(o.border >= 0)
+            s.border.setValue(o.border if o.border >= 0 else 1.12); s.busy = False
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
             s.objname.setText(object_name(o))
             s.show_spawns(o)
