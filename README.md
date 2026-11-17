@@ -8,9 +8,19 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 > Unofficial fan project, not affiliated with the BZFlag project.
 
-**Current release: 1.5.3** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
+**Current release: 1.5.4** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
 
+
+## What's new in 1.5.4
+
+- **Dynamic color.** **Objects → Dynamic color...** edits BZFlag's `dynamicColor` blocks, which make a material's color change over time. Each block has a name and, for each channel (red, green, blue, alpha), the lines BZFlag knows: `limits min max`, `sinusoid period offset weight`, `clampUp period offset width`, `clampDown period offset width` and `sequence period offset states` (states 0, 1 or 2). The sinusoid, clampUp and clampDown lines can repeat; limits and sequence may appear once per channel. Use the **Add a line...** box to insert a template line, then change the numbers; the dialog checks every line before it saves. A material uses one through the new **Dynamic color** box in **Objects → Materials** (the BZW `dyncol` line). Dynamic colors already in a map are read, shown and kept (lines the editor doesn't know are kept as written), come along with custom objects and imported meshes (a clash in names is renamed, like materials), are written before the materials that use them, and are listed by **Remove Unused** when nothing uses them. The 3D preview does not animate colors, so you'll see the change in BZFlag itself.
+- **Hardpoint spawn points: heights and click to add.** The **Spawn points** box of a hardpoint has three new controls. **Click map to add** puts the 2D map in a mode where each click adds a spawn spot at that place (snapping applies; Esc or pressing the button again stops, and selecting another object also ends it). **Height z** sets the height of spots you add with the buttons (*hardpoint height* means no z is written, so the plugin uses the hardpoint's own), and **Set all** gives every spot of that hardpoint the same height. A single spot can have its own height by writing `x y z` on its line. Spots added by clicking or by a ring follow symmetry like the rest of the hardpoint.
+- **Portable zip for Windows, macOS and Linux.** `BZMapMaker-1.5.4-portable.zip` holds the program, its objects and a starter script for each system (`Start-Windows.bat`, `Start-Mac.command`, `start-linux.sh`). It needs Python 3.9 or newer; the first run sets up PyQt6, NumPy and PyOpenGL in a `.venv` folder next to it (this needs the internet once), and later runs start straight away. It is the same program as the packages, just run from source; use it if a package for your system isn't available.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
+</p>
 
 ## What's new in 1.5.3
 
@@ -20,10 +30,6 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
   - **Automatic skips software OpenGL.** If the system's OpenGL is only emulated on the CPU (Mesa `llvmpipe`, `softpipe`, a virtual machine without 3D acceleration), Automatic uses NumPy instead, since the emulation is no faster.
   - **Differences from the NumPy picture:** *Edge Shading in 3D* has no effect in OpenGL mode, and textures are the same small (16-pixel) copies. Selection outlines, labels, links and the compass are drawn exactly as before.
   - **This is new, so please report problems.** If the 3D view goes blank, flickers, shows wrong colors or textures, is slower than before, or the program crashes, please open an issue at <https://github.com/ahsthree/BZMapMaker/issues> with: your operating system and desktop (for example "Debian 13, GNOME on Wayland"), the line the status bar shows after choosing *View → 3D Renderer → OpenGL* (it names your graphics card and OpenGL version), and whether *Software (NumPy)* looks right. You can always switch back with *View → 3D Renderer → Software (NumPy)*.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
-</p>
 
 ## What's new in 1.5.2
 
@@ -102,9 +108,9 @@ Download the file for your system from the [Releases](../../releases) page.
 
 | System | File | How to install |
 | --- | --- | --- |
-| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.5.3_all.deb` | `sudo apt install ./bzmapmaker_1.5.3_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
-| Windows | `BZMapMaker-1.5.3-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
-| macOS | `BZMapMaker-1.5.3-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
+| Debian, Ubuntu and derivatives (including Chromebook Linux) | `bzmapmaker_1.5.4_all.deb` | `sudo apt install ./bzmapmaker_1.5.4_all.deb`, then start **BZ Map Maker** from your menu or run `bzmapmaker` (optionally `bzmapmaker mymap.bzw`). Installing this way pulls in Python, PyQt6 and NumPy for you, and puts the starter custom objects in `/usr/share/bzmapmaker/objects`. |
+| Windows | `BZMapMaker-1.5.4-windows.zip` | Unzip and run `BZMapMaker.exe`. It isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**. |
+| macOS | `BZMapMaker-1.5.4-macos.dmg` | Open the disk image and drag **BZMapMaker** to Applications. It isn't signed or notarized, so the first time, right-click the app and choose **Open**. The build is for the type of Mac that built it (Apple Silicon); on an Intel Mac, run from source below. |
 
 To upgrade the `.deb`, install the newer file the same way.
 
@@ -188,11 +194,11 @@ If Qt complains about a missing `xcb` plugin, run `sudo apt install libxcb-curso
 
 ### Building the packages yourself
 
-The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.5.3`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
+The release packages are built from this repository by `.github/workflows/release.yml`. Push a tag such as `v1.5.4`, or run the workflow from the **Actions** tab, and download the three packages from the run's artifacts. Each package has to be built on its own operating system, so the workflow uses a Linux, a Windows and a macOS runner. You can also build one locally:
 
 | Package | Command (run on that OS) | Output |
 | --- | --- | --- |
-| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.5.3_all.deb` |
+| Debian/Ubuntu | `./build_deb.sh` | `bzmapmaker_1.5.4_all.deb` |
 | Windows | `build_windows.bat` | `dist\BZMapMaker.exe` and a `.zip` |
 | macOS | `./build_macos.sh` | `dist/BZMapMaker.app` and a `.dmg` |
 
@@ -444,7 +450,7 @@ Reads and writes `world`, `options`, `physics`, `textureMatrix`, `material`, `bo
 
 The 3D view uses a real per-pixel depth buffer (built with NumPy), so overlapping objects always render in the correct front-to-back order regardless of draw order. This fixed an earlier issue where a long, thin object could visually glitch through a nearby one. Building that buffer costs some CPU every time the view redraws, so a very large map or very high-division arcs/cones may feel less smooth while dragging or orbiting than a simple map does.
 
-The NumPy renderer needs no graphics card or OpenGL, which keeps it dependable on school Chromebooks and other low-spec machines, and it is always the fallback. Since 1.5.3 the view can instead be drawn by the graphics card (View → 3D Renderer); the rest of this section describes what the NumPy renderer does, and the OpenGL one lights and textures faces the same way. What the picture is made of, from back to front:
+The NumPy renderer needs no graphics card or OpenGL, which keeps it dependable on school Chromebooks and other low-spec machines, and it is always the fallback. Since 1.5.4 the view can instead be drawn by the graphics card (View → 3D Renderer); the rest of this section describes what the NumPy renderer does, and the OpenGL one lights and textures faces the same way. What the picture is made of, from back to front:
 
 - **Base color:** each face's material color, shaded by a simple light direction.
 - **Default textures (View → Show Textures in 3D):** a face with no material gets what BZFlag gives it: boxes and arcs have `boxwall` walls with a `roof` top and bottom, pyramids are `pyrwall`, and cones are `boxwall`. These are 16-pixel versions built into the program, so nothing has to be installed, and nothing about them is written to your map. Give an object (or just one of its faces) a material and that replaces the default. Bases, teleporters, zones and meshes keep plain colors.
