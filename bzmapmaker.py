@@ -8,7 +8,7 @@ transform, which is an exact planar homography, not an OpenGL approximation.
 """
 import sys, os, re, math, json, copy, time, types, base64, hashlib, shlex, threading, queue, random, ctypes, urllib.request
 
-__version__ = '1.5.3'
+__version__ = '1.5.4'
 import numpy as np
 from dataclasses import dataclass, field, asdict, replace
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF, QRectF, QRect, QSize, QSettings, QTimer, QUrl
@@ -181,6 +181,70 @@ def _texmat_names(mat):
 def _retarget_texmat(mat, mapping):
     fix = lambda ln: ('texmat ' + mapping[ln.split()[1]]) if len(ln.split()) > 1 and ln.split()[0].lower() == 'texmat' and ln.split()[1] in mapping else ln
     mat.extra = [fix(ln) for ln in mat.extra]; mat.raw = [fix(ln) for ln in mat.raw]
+
+
+DYNCOL_CHANNELS = ('red', 'green', 'blue', 'alpha')
+
+
+@dataclass
+class DynColor:
+    """A dynamicColor: how each colour channel of a material changes over time (a sum of sinusoids, with limits, clamps or a sequence).
+    Each channel holds the lines that follow its name in the BZW block, e.g. 'limits 0 1' or 'sinusoid 0.1 0 0.25'.
+    Lines this editor doesn't know are kept in `extra`."""
+    name: str
+    red: list = field(default_factory=list)
+    green: list = field(default_factory=list)
+    blue: list = field(default_factory=list)
+    alpha: list = field(default_factory=list)
+    extra: list = field(default_factory=list)
+    raw: list = field(default_factory=list)
+
+
+def dyncol_parse_line(text):
+    """One channel function as it should be written ('limits 0 1', 'sinusoid p o w', 'clampUp p o w', 'clampDown p o w',
+    'sequence p o 0 1 2 ...'), or None if it is not a valid one. An empty line gives ''."""
+    p = text.replace(',', ' ').split()
+    if not p: return ''
+    f = p[0].lower()
+    try:
+        if f == 'limits' and len(p) == 3: return 'limits %s %s' % (num(float(p[1])), num(float(p[2])))
+        if f == 'sinusoid' and len(p) == 4: return 'sinusoid ' + ' '.join(num(float(a)) for a in p[1:])
+        if f in ('clampup', 'clampdown') and len(p) == 4: return ('clampUp ' if f == 'clampup' else 'clampDown ') + ' '.join(num(float(a)) for a in p[1:])
+        if f == 'sequence' and len(p) >= 4 and all(a in ('0', '1', '2') for a in p[3:]):
+            return 'sequence %s %s %s' % (num(float(p[1])), num(float(p[2])), ' '.join(p[3:]))
+    except ValueError:
+        pass
+    return None
+
+
+def dyncol_problems(channel, lines):
+    """A message if a channel's lines break a rule (limits and sequence at most once each), else ''."""
+    firsts = [ln.split()[0].lower() for ln in lines if ln.split()]
+    for once in ('limits', 'sequence'):
+        if firsts.count(once) > 1: return 'The %s channel has more than one "%s" line; only one is allowed.' % (channel, once)
+    return ''
+
+
+def dyncol_block(d):
+    if d.raw: return ['dynamicColor'] + ['  ' + b for b in d.raw] + ['end']  # untouched since import
+    ln = ['dynamicColor', '  name %s' % d.name]
+    for ch in DYNCOL_CHANNELS:
+        ln += ['  %s %s' % (ch, f) for f in getattr(d, ch)]
+    return ln + ['  ' + e for e in d.extra] + ['end']
+
+
+def _dyncol_names(mat):
+    """Dynamic colors a material points at (its 'dyncol <name>' lines)."""
+    return [q[1] for q in (ln.split() for ln in (mat.raw or mat.extra)) if len(q) > 1 and q[0].lower() == 'dyncol']
+
+
+def _retarget_dyncol(mat, mapping):
+    fix = lambda ln: ('dyncol ' + mapping[ln.split()[1]]) if len(ln.split()) > 1 and ln.split()[0].lower() == 'dyncol' and ln.split()[1] in mapping else ln
+    mat.extra = [fix(ln) for ln in mat.extra]; mat.raw = [fix(ln) for ln in mat.raw]
+
+
+def _dc_sig(d):
+    return tuple(tuple(getattr(d, ch)) for ch in DYNCOL_CHANNELS) + (tuple(d.extra),)
 
 
 def _tm_sig(t):
@@ -424,7 +488,7 @@ def parse(text):
         lines.append(code); metas.append(pending); pending = None
     i = 0
     nw, objs, materials, defines, links, extras, options_text, physics = None, [], {}, {}, [], [], '', {}
-    world = new_world(); texmats = {}
+    world = new_world(); texmats = {}; dyncols = {}
     TOP = {'world', 'material', 'define', 'enddef', 'group', 'box', 'pyramid', 'base', 'teleporter', 'arc',
            'cone', 'mesh', 'meshbox', 'meshpyr', 'tetra', 'sphere', 'link', 'physics', 'zone', 'weapon', 'hardpoint',
            'options', 'dynamiccolor', 'texturematrix', 'waterlevel', 'wall', 'transform'}
@@ -525,6 +589,19 @@ def parse(text):
                 tm.extra.append(ln)  # anything unrecognised is written back as it was
             tm.name = tm.name or (p[1] if len(p) > 1 else 'texmat%d' % (len(texmats) + 1)); tm.raw = list(body)
             texmats[tm.name] = tm
+        elif k == 'dynamiccolor':
+            body = read_raw_block(); dc = DynColor('')
+            for ln in body:
+                q = ln.split()
+                if not q: continue
+                kk = q[0].lower()
+                if kk == 'name' and len(q) > 1: dc.name = q[1]; continue
+                if kk in DYNCOL_CHANNELS:
+                    f = dyncol_parse_line(' '.join(q[1:]))
+                    if f: getattr(dc, kk).append(f); continue
+                dc.extra.append(ln)   # anything unrecognised is written back as it was
+            dc.name = dc.name or (p[1] if len(p) > 1 else 'dyncol%d' % (len(dyncols) + 1)); dc.raw = list(body)
+            dyncols[dc.name] = dc
         elif k == 'physics':
             body = read_raw_block()
             name, linear, angular, slide, death = '', (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, ''
@@ -792,6 +869,7 @@ def parse(text):
             if fface == 'f': o.link, o.lface = (tplain if tchain else tn), tface
             elif fface == 'b': o.blink, o.bface = (tplain if tchain else tn), tface
     world['rawlinks'] = raw
+    world['dyncols'] = dyncols   # carried to Model.load, which keeps them apart from the world settings
     return nw, objs, materials, defines, extras, options_text, physics, world, texmats
 
 
@@ -1029,7 +1107,7 @@ _LIBCACHE = {}
 
 
 def load_library_content(path):
-    """(objs, defines, materials, texmats, physics) of a library file with the map-specific objects removed, or None."""
+    """(objs, defines, materials, texmats, physics, dyncols) of a library file with the map-specific objects removed, or None."""
     try:
         key = (path, os.path.getmtime(path))
         if key not in _LIBCACHE:
@@ -1037,7 +1115,7 @@ def load_library_content(path):
             _nw, objs, materials, defines, _x, _o, physics, _w, texmats = parse(text)
             objs = [o for o in objs if o.t not in LIB_SKIP]
             defines = {n: [k for k in ks if k.t not in LIB_SKIP] for n, ks in defines.items()}
-            _LIBCACHE[key] = (objs, defines, materials, texmats, physics)
+            _LIBCACHE[key] = (objs, defines, materials, texmats, physics, _w.get('dyncols', {}))
         return copy.deepcopy(_LIBCACHE[key])
     except OSError:
         return None
@@ -1119,7 +1197,7 @@ def _uses_in(objs, defines):
     return mats, phys
 
 
-def library_text(name, category, description, objs, defines, materials, texmats=None, physics=None):
+def library_text(name, category, description, objs, defines, materials, texmats=None, physics=None, dyncols=None):
     """The .bzw text of a library object: header, the materials it uses, the prefabs it needs, then the objects."""
     need, order = set(), []
 
@@ -1138,6 +1216,9 @@ def library_text(name, category, description, objs, defines, materials, texmats=
     wanted = {t for mn in used if mn in materials for t in _texmat_names(materials[mn])}
     for tn in sorted(wanted):  # a material's texturematrix has to be defined before it
         if tn in (texmats or {}): out += texmatrix_block(texmats[tn]) + ['']
+    wanted_d = {t for mn in used if mn in materials for t in _dyncol_names(materials[mn])}
+    for dn_ in sorted(wanted_d):  # and its dynamic color
+        if dn_ in (dyncols or {}): out += dyncol_block(dyncols[dn_]) + ['']
     for mn in sorted(used):
         if mn in materials: out += material_block(materials[mn]) + ['']
     for dn in order:
@@ -1173,7 +1254,7 @@ def library_path_for(name, directory=None):
     return path, False
 
 
-def save_library_object(name, category, description, objs, defines, materials, texmats=None, directory=None, physics=None):
+def save_library_object(name, category, description, objs, defines, materials, texmats=None, directory=None, physics=None, dyncols=None):
     """Write objs (centred on the origin, map-only objects left out) into the person's library. Returns the path, or None."""
     objs = copy.deepcopy([o for o in objs if o.t not in LIB_SKIP])
     if not objs: return None
@@ -1183,7 +1264,7 @@ def save_library_object(name, category, description, objs, defines, materials, t
     directory = directory or user_library_dir()
     os.makedirs(directory, exist_ok=True)
     path, _ = library_path_for(name, directory)
-    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials, texmats or {}, physics or {}))
+    with open(path, 'w', encoding='utf-8') as fh: fh.write(library_text(name, category, description, objs, defines, materials, texmats or {}, physics or {}, dyncols or {}))
     _LIBCACHE.clear()
     return path
 
@@ -1199,7 +1280,7 @@ def import_into_library(src, name, category, description, split=False, directory
     out = []
     for i, grp in enumerate(groups, 1):
         label = name if len(groups) == 1 else '%s %d' % (name, i)
-        p = save_library_object(label, category, description, grp, defines, materials, texmats, directory, physics)
+        p = save_library_object(label, category, description, grp, defines, materials, texmats, directory, physics, _w.get('dyncols', {}))
         if p: out.append(p)
     return out
 
@@ -1219,7 +1300,10 @@ class Model(QObject):
         s.options_text = ''
         s.physics = {}
         s.texmats = {}  # Objects -> Texturematrix
+        s.dyncols = {}  # Objects -> Dynamic color
         s.world = new_world()  # Objects -> World Settings
+        s.spawn_pick = None   # a hardpoint while 'Click map to add' is on: the next clicks on the 2D map add its spawn spots
+        s.spawn_z = None      # height given to new spawn spots (None = the hardpoint's own)
         s.lib_item = None  # the custom object the 'Custom object' tool places
         s.nid, s.sym = 1, 0
         s.tool, s.snap = 'select', True
@@ -1230,7 +1314,7 @@ class Model(QObject):
              'materials': {k: asdict(v) for k, v in s.materials.items()},
              'defines': {k: [asdict(o) for o in v] for k, v in s.defines.items()}, 'extras': s.extras,
              'options_text': s.options_text, 'physics': {k: asdict(v) for k, v in s.physics.items()},
-             'texmats': {k: asdict(v) for k, v in s.texmats.items()}, 'world': s.world}
+             'texmats': {k: asdict(v) for k, v in s.texmats.items()}, 'dyncols': {k: asdict(v) for k, v in s.dyncols.items()}, 'world': s.world}
         s.undo.append(json.dumps(d)); del s.undo[:-80]
 
     def pop(s):
@@ -1243,6 +1327,7 @@ class Model(QObject):
         s.options_text = d.get('options_text', '')
         s.physics = {k: PhysicsDriver(**v) for k, v in d.get('physics', {}).items()}
         s.texmats = {k: TexMatrix(**v) for k, v in d.get('texmats', {}).items()}
+        s.dyncols = {k: DynColor(**v) for k, v in d.get('dyncols', {}).items()}
         s.world = d.get('world') or new_world()
         s.nid = max([s.nid] + [o.uid + 1 for o in s.objs])
         s.selected.emit(); s.changed.emit()
@@ -1276,12 +1361,14 @@ class Model(QObject):
         kept = [m for n, m in s.materials.items() if n not in mats]
         ref_kept = {t for m in kept for t in _texmat_names(m)}; ref_all = {t for m in s.materials.values() for t in _texmat_names(m)}
         texmats = [n for n in s.texmats if n not in ref_kept and not named(n) and (everything or n in ref_all)]
-        return {'defines': dead, 'materials': mats, 'texmats': texmats, 'physics': phys}
+        dref_kept = {t for m in kept for t in _dyncol_names(m)}; dref_all = {t for m in s.materials.values() for t in _dyncol_names(m)}
+        dyncols = [n for n in s.dyncols if n not in dref_kept and not named(n) and (everything or n in dref_all)]
+        return {'defines': dead, 'materials': mats, 'texmats': texmats, 'physics': phys, 'dyncols': dyncols}
 
     def apply_cleanup(s, plan):
         """Delete what the plan lists (undoable). Anything still used by something that is being kept is left
         alone, so unticking a prefab in the dialog can't strand the materials it needs. Returns what was removed."""
-        gone = {k: [] for k in ('defines', 'materials', 'texmats', 'physics')}
+        gone = {k: [] for k in ('defines', 'materials', 'texmats', 'physics', 'dyncols')}
         want = {k: set(plan.get(k, ())) for k in gone}
         if not any(want.values()): return gone
         s.push()
@@ -1297,6 +1384,9 @@ class Model(QObject):
         ref = {t for m in s.materials.values() for t in _texmat_names(m)}
         for n in want['texmats']:
             if n in s.texmats and n not in ref: del s.texmats[n]; gone['texmats'].append(n)
+        dref = {t for m in s.materials.values() for t in _dyncol_names(m)}
+        for n in want['dyncols']:
+            if n in s.dyncols and n not in dref: del s.dyncols[n]; gone['dyncols'].append(n)
         s.changed.emit()
         return gone
 
@@ -1433,7 +1523,7 @@ class Model(QObject):
         if not got or not got[0]: return None
         return s.place_content(item.name, *got, x, y)
 
-    def merge_resources(s, materials, texmats, physics):
+    def merge_resources(s, materials, texmats, physics, dyncols=None):
         """Bring materials, texturematrix and physics drivers from another file into the map. One the map already has with the
         same content is shared (also when an earlier import already brought it in under a new name); a different one with the same
         name comes in under a new name. Returns ({old material name: new}, {old physics driver name: new}) so the objects that
@@ -1454,14 +1544,17 @@ class Model(QObject):
         tmap = {n: r for n in list(texmats) if (r := take(s.texmats, n, texmats[n], _tm_sig, texmats))}
         if tmap:
             for mat in materials.values(): _retarget_texmat(mat, tmap)
+        dmap = {n: r for n in list(dyncols or {}) if (r := take(s.dyncols, n, dyncols[n], _dc_sig, dyncols))}
+        if dmap:
+            for mat in materials.values(): _retarget_dyncol(mat, dmap)
         rename = {n: r for n in list(materials) if (r := take(s.materials, n, materials[n], _mat_sig, materials))}
         return rename, pmap
 
-    def place_content(s, name, objs, defines, materials, texmats, physics, x, y):
+    def place_content(s, name, objs, defines, materials, texmats, physics, dyncols, x, y):
         """Add parsed objects to the map as one group instance called name at (x, y), bringing their materials, texturematrix,
         physics drivers and prefabs along (see place_library). Used for library objects and for generated terrain. Returns the group."""
         slug = lib_slug(name)
-        rename, pmap = s.merge_resources(materials, texmats, physics)
+        rename, pmap = s.merge_resources(materials, texmats, physics, dyncols)
         sig = lambda kids: '\n'.join('\n'.join(obj_block(k)) for k in kids)
         dmap = {}
 
@@ -1490,6 +1583,11 @@ class Model(QObject):
         g.uid = s.nid; s.nid += 1
         s.objs.append(g)
         return g
+
+    def add_spawn(s, o, x, y):
+        """Add a spawn spot at world (x, y) to hardpoint o, at the current new-spawn height (None = the hardpoint's own)."""
+        s.push(); o.spawns = tuple(o.spawns) + ((x - o.x, y - o.y, s.spawn_z),)
+        s.sync_family(o); s.changed.emit()
 
     def free_hardpoint_name(s, extra=()):
         taken = {o.name for o in s.objs if o.t == 'hardpoint'} | {z.name for z in extra}; j = 1
@@ -1785,7 +1883,7 @@ class Model(QObject):
     def load(s, text, folder=None):
         nw, objs, materials, defines, extras, options_text, physics, world, texmats = parse(text)
         s.push(); s.W = nw or s.W; s.world = world; s.objs = objs; s.materials = materials; s.defines = defines
-        s.extras = extras; s.options_text = options_text; s.physics = physics; s.texmats = texmats
+        s.extras = extras; s.options_text = options_text; s.physics = physics; s.texmats = texmats; s.dyncols = world.pop('dyncols', {})
         s.sel = None; s.msel = []
         for o in s.objs: o.uid = s.nid; s.nid += 1
         s.reset.emit(); s.selected.emit(); s.changed.emit()
@@ -1796,6 +1894,7 @@ class Model(QObject):
             out += ['options'] + ['  ' + ln for ln in s.options_text.splitlines() if ln.strip()] + ['end', '']
         for pd in s.physics.values(): out += physics_block(pd) + ['']
         for tm in s.texmats.values(): out += texmatrix_block(tm) + ['']  # before the materials that use them
+        for dc in s.dyncols.values(): out += dyncol_block(dc) + ['']
         for c in s.extras: out += [c, '']  # physics, dynamic colors... they may be referenced below
         for m in s.materials.values(): out += material_block(m) + ['']
         for name in s.ordered_defines():
@@ -2129,6 +2228,10 @@ class Editor(QWidget):
             s.drag = pan; return
         if b != Qt.MouseButton.LeftButton: return
         m = s.m
+        sp = m.spawn_pick
+        if sp is not None:   # 'Click map to add' is on: each click adds a spawn spot to that hardpoint
+            if m.sel is sp and any(sp is o for o in m.objs): m.add_spawn(sp, s.sn(wx), s.sn(wy)); return
+            m.spawn_pick = None; s.unsetCursor()   # the hardpoint isn't selected any more: leave the mode and carry on
         if s.m.tool == 'select' and e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             # Shift+drag = box select (Ctrl+Shift+drag adds to the current selection)
             s.drag = ['marquee', (wx, wy), (wx, wy), bool(ctrl)]; return
@@ -2180,6 +2283,8 @@ class Editor(QWidget):
 
     def keyPressEvent(s, e):
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat(): s.space = True
+        elif e.key() == Qt.Key.Key_Escape and s.m.spawn_pick is not None:
+            s.m.spawn_pick = None; s.unsetCursor(); s.m.selected.emit()   # the panel's button pops back up
 
     def keyReleaseEvent(s, e):
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat(): s.space = False
@@ -4870,7 +4975,7 @@ def replace_all_text(doc, find, repl, flags, limit=200000):
 
 class CleanupDialog(QDialog):
     """Objects > Remove Unused: choose which leftovers to delete from the map."""
-    KINDS = (('defines', 'Group definition'), ('materials', 'Material'), ('texmats', 'Texturematrix'), ('physics', 'Physics driver'))
+    KINDS = (('defines', 'Group definition'), ('materials', 'Material'), ('texmats', 'Texturematrix'), ('dyncols', 'Dynamic color'), ('physics', 'Physics driver'))
 
     def __init__(s, m):
         super().__init__(); s.m = m
@@ -4880,7 +4985,7 @@ class CleanupDialog(QDialog):
                          'Undo (Ctrl+Z) brings it back.'); s.intro.setWordWrap(True); lay.addWidget(s.intro)
         s.list = QListWidget(); lay.addWidget(s.list, 1)
         s.empty = QLabel('Nothing to remove.'); lay.addWidget(s.empty)
-        s.more = QCheckBox('Also list materials, texturematrix and physics drivers that nothing uses at all')
+        s.more = QCheckBox('Also list materials, texturematrix, dynamic colors and physics drivers that nothing uses at all')
         s.more.toggled.connect(lambda _v: s.fill()); lay.addWidget(s.more)
         s.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         s.bb.button(QDialogButtonBox.StandardButton.Ok).setText('Remove Checked')
@@ -4983,6 +5088,93 @@ class TexMatrixDialog(QDialog):
         s.m.changed.emit()
 
 
+class DynamicColorDialog(QDialog):
+    """Objects > Dynamic color: named dynamicColor blocks that make a material's color change over time. Each channel (red, green, blue,
+    alpha) has its own lines: limits, sinusoid, clampUp, clampDown or sequence. A material uses one through its 'Dynamic color' field."""
+    TEMPLATES = (('limits', 'limits 0 1'), ('sinusoid', 'sinusoid 1 0 0.5'), ('clampUp', 'clampUp 1 0 0.5'),
+                 ('clampDown', 'clampDown 1 0 0.5'), ('sequence', 'sequence 1 0 0 1 2'))
+
+    def __init__(s, m):
+        super().__init__(); s.m, s.cur, s.boxes = m, None, {}
+        s.setWindowTitle('Dynamic color'); s.resize(780, 660)
+        root = QHBoxLayout(s)
+        s.list = QListWidget(); s.list.addItems(sorted(m.dyncols)); s.list.currentTextChanged.connect(s.pick)
+        root.addWidget(s.list, 1)
+        col = QVBoxLayout(); root.addLayout(col, 4)
+        s.name = QLineEdit(); form = QFormLayout(); form.addRow('Name', s.name); col.addLayout(form)
+        rows = [QHBoxLayout(), QHBoxLayout()]
+        for i, ch in enumerate(DYNCOL_CHANNELS):
+            cell = QVBoxLayout(); cell.addWidget(QLabel('<b>%s</b>' % ch.capitalize()))
+            box = QPlainTextEdit(); box.setMaximumHeight(96); box.setPlaceholderText('one per line, e.g.  sinusoid 0.5 0 0.5')
+            box.setToolTip('The lines that follow "%s" in the BZW block: limits min max / sinusoid period offset weight / clampUp period offset width / '
+                           'clampDown period offset width / sequence period offset states (0, 1 or 2 each).' % ch)
+            add = QComboBox(); add.addItems(['Add a line...'] + [t[0] for t in s.TEMPLATES])
+            add.activated.connect(lambda idx, b=box, a=add: s.add_line(b, a, idx))
+            cell.addWidget(box); cell.addWidget(add); s.boxes[ch] = box
+            rows[i // 2].addLayout(cell)
+        for r in rows: col.addLayout(r)
+        s.msg = QLabel(); s.msg.setWordWrap(True); s.msg.setStyleSheet('color:#b5651d'); col.addWidget(s.msg)
+        btns = QHBoxLayout()
+        add_b = QPushButton('Add / Update'); add_b.clicked.connect(s.save)
+        rm = QPushButton('Remove'); rm.clicked.connect(s.remove)
+        btns.addWidget(add_b); btns.addWidget(rm); col.addLayout(btns)
+        note = QLabel('Give a material one with its "Dynamic color" field in Objects > Materials. A channel\'s sinusoids add up and the total is clamped '
+                      'between 0 and 1; a sinusoid starts at its maximum. limits is a min and a max and may appear once. A sequence (once per channel) uses states '
+                      '0 = clamp down, 1 = no clamp, 2 = clamp up, and then clampUp and clampDown lines have no effect. If both a clampUp and a clampDown are active the '
+                      'value is (min + max) / 2. The 3D preview does not animate colors, so you\'ll see the change in BZFlag itself.')
+        note.setWordWrap(True); col.addWidget(note); col.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(s.accept); bb.accepted.connect(s.accept)
+        col.addWidget(bb)
+
+    def add_line(s, box, combo, idx):
+        if idx > 0:
+            text = box.toPlainText().rstrip('\n'); box.setPlainText((text + '\n' if text else '') + s.TEMPLATES[idx - 1][1])
+        combo.setCurrentIndex(0)
+
+    def pick(s, name):
+        s.cur = s.m.dyncols.get(name)
+        if not s.cur: return
+        s.name.setText(s.cur.name); s.msg.setText('')
+        for ch in DYNCOL_CHANNELS:
+            s.boxes[ch].setPlainText('\n'.join(getattr(s.cur, ch)))
+
+    def values(s):
+        """({channel: [lines]}, '') or (None, why not)."""
+        out = {}
+        for ch in DYNCOL_CHANNELS:
+            lines = []
+            for n, ln in enumerate(s.boxes[ch].toPlainText().splitlines(), 1):
+                f = dyncol_parse_line(ln)
+                if f is None: return None, 'The %s channel, line %d is not valid: "%s". Use limits (2 numbers), sinusoid / clampUp / clampDown (3 numbers) or sequence (period, offset, then 0, 1 or 2).' % (ch, n, ln.strip())
+                if f: lines.append(f)
+            why = dyncol_problems(ch, lines)
+            if why: return None, why
+            out[ch] = lines
+        return out, ''
+
+    def save(s):
+        name = s.name.text().strip()
+        if not name or any(c.isspace() for c in name):
+            QMessageBox.information(s, 'Dynamic color', 'Give it a name with no spaces, such as pulse_red.'); return
+        vals, why = s.values(); s.msg.setText(why)
+        if vals is None: return
+        old = s.m.dyncols.get(name); s.m.push()
+        s.m.dyncols[name] = DynColor(name, extra=list(old.extra) if old else [], **vals)   # keep lines we don't edit
+        if s.list.findItems(name, Qt.MatchFlag.MatchExactly) == []: s.list.addItem(name)
+        s.m.changed.emit()
+
+    def remove(s):
+        name = s.name.text().strip()
+        if name not in s.m.dyncols: return
+        users = [m.name for m in s.m.materials.values() if name in _dyncol_names(m)]
+        if users and QMessageBox.question(s, 'Remove dynamic color', '%s use%s "%s". Remove it anyway? (They keep pointing at it, '
+                'and BZFlag will complain until you change them.)' % (', '.join(users), 's' if len(users) == 1 else '', name)) \
+                != QMessageBox.StandardButton.Yes: return
+        s.m.push(); del s.m.dyncols[name]
+        for it in s.list.findItems(name, Qt.MatchFlag.MatchExactly): s.list.takeItem(s.list.row(it))
+        s.m.changed.emit()
+
+
 class MaterialsDialog(QDialog):
     APPROVED = 'http://images.bzflag.org/'
 
@@ -5005,7 +5197,10 @@ class MaterialsDialog(QDialog):
         form.addRow('Texture', trow)
         s.texmat = QComboBox(); s.fill_texmat('')
         s.texmat.setToolTip('How the texture moves, spins or scales; define them in Objects > Texturematrix')
-        form.addRow('Texturematrix', s.texmat); form.addRow('Color R G B A', rgb)
+        form.addRow('Texturematrix', s.texmat)
+        s.dyncol = QComboBox(); s.fill_dyncol('')
+        s.dyncol.setToolTip('Make the color change over time (the BZW dyncol line); define them in Objects > Dynamic color')
+        form.addRow('Dynamic color', s.dyncol); form.addRow('Color R G B A', rgb)
         col.addLayout(form)
         s.texwarn = QLabel(); s.texwarn.setWordWrap(True); s.texwarn.setStyleSheet('color:#b5651d')
         col.addWidget(s.texwarn)
@@ -5032,13 +5227,18 @@ class MaterialsDialog(QDialog):
         s.cur = s.m.materials.get(name)
         if s.cur:
             s.name.setText(s.cur.name); s.tex.setText(s.cur.texture)
-            s.fill_texmat((_texmat_names(s.cur) or [''])[0])
+            s.fill_texmat((_texmat_names(s.cur) or [''])[0]); s.fill_dyncol((_dyncol_names(s.cur) or [''])[0])
             for sp, v in zip((s.r, s.g, s.b, s.al), s.cur.color): sp.setValue(v)
 
     def fill_texmat(s, current):
         """The combo lists the map's texturematrix; one the material names but the map lacks is kept so it isn't lost."""
         names = sorted(set(s.m.texmats) | ({current} if current else set()))
         s.texmat.clear(); s.texmat.addItems(['(none)'] + names); s.texmat.setCurrentText(current or '(none)')
+
+    def fill_dyncol(s, current):
+        """The combo lists the map's dynamic colors; one the material names but the map lacks is kept so it isn't lost."""
+        names = sorted(set(s.m.dyncols) | ({current} if current else set()))
+        s.dyncol.clear(); s.dyncol.addItems(['(none)'] + names); s.dyncol.setCurrentText(current or '(none)')
 
     def check_tex(s, text):
         """The game only fetches http://, never https://, so silently drop the 's'. Then warn --
@@ -5070,8 +5270,9 @@ class MaterialsDialog(QDialog):
         name = s.name.text().strip()
         if not name: return
         old = s.m.materials.get(name)
-        extra = [ln for ln in (old.extra if old else []) if ln.split()[:1] and ln.split()[0].lower() != 'texmat']  # keep addtexture etc.
+        extra = [ln for ln in (old.extra if old else []) if ln.split()[:1] and ln.split()[0].lower() not in ('texmat', 'dyncol')]  # keep addtexture etc.
         if s.texmat.currentText() != '(none)': extra.append('texmat ' + s.texmat.currentText())
+        if s.dyncol.currentText() != '(none)': extra.append('dyncol ' + s.dyncol.currentText())
         mat = Material(name, s.tex.text().strip(), (s.r.value(), s.g.value(), s.b.value(), s.al.value()), extra)
         s.m.materials[name] = mat
         if s.m.texcache.get(mat.texture, 0) is None: del s.m.texcache[mat.texture]  # not found before? look again now
@@ -5741,6 +5942,7 @@ class Win(QMainWindow):
         ob = s.menuBar().addMenu('&Objects')
         s.act(ob, 'Materials...', s.open_materials)
         s.act(ob, 'Texturematrix...', s.open_texmats)
+        s.act(ob, 'Dynamic color...', s.open_dyncols)
         s.act(ob, 'Import Mesh Object...', s.import_mesh)
         s.lib_menu = ob.addMenu('Custom Objects'); s.lib_menu.aboutToShow.connect(s.fill_library_menu)
         s.act(ob, 'Generate Terrain...', s.generate_terrain)
@@ -5804,10 +6006,19 @@ class Win(QMainWindow):
         s.spawn_txt.setPlaceholderText('one per line: x y   (or x y z), world coordinates')
         s.spawn_txt.setToolTip('Where players spawn for this hardpoint (the plugin\'s spawn lines): one spot per line, x y or x y z, in world coordinates. '
                                'Players spawn at one of them at random, facing the hardpoint. Put them on open ground. With none, the plugin asks the server for safe spots.')
+        s.spawn_click = QPushButton('Click map to add'); s.spawn_click.setCheckable(True); s.spawn_click.toggled.connect(s.toggle_spawn_click)
+        s.spawn_click.setToolTip('Press this, then click the 2D map once for each spawn spot (snapping applies). Esc, or pressing it again, stops.')
         ring = QPushButton('Add a ring...'); ring.clicked.connect(s.add_spawn_ring)
         clr = QPushButton('Clear'); clr.clicked.connect(s.clear_spawns)
+        s.spawn_z = QDoubleSpinBox(); s.spawn_z.setRange(-1000.0, 10000.0); s.spawn_z.setDecimals(1); s.spawn_z.setSingleStep(1.0)
+        s.spawn_z.setSpecialValueText('hardpoint height'); s.spawn_z.setValue(-1000.0)   # the bottom of the range means not set
+        s.spawn_z.setToolTip('The height (z) of spawn spots you add with the buttons. Leave it at "hardpoint height" and no z is written, so the plugin uses the hardpoint\'s own. '
+                             'To give one spot its own height, write x y z on its line above.')
+        s.spawn_z.valueChanged.connect(s.set_spawn_z)
+        setz = QPushButton('Set all'); setz.setToolTip('Give every spawn spot of this hardpoint that height.'); setz.clicked.connect(s.apply_spawn_z)
         s.spawn_box = QWidget(); sbl = QVBoxLayout(s.spawn_box); sbl.setContentsMargins(0, 0, 0, 0); sbl.addWidget(s.spawn_txt)
-        sbr = QHBoxLayout(); sbr.addWidget(ring); sbr.addWidget(clr); sbr.addStretch(1); sbl.addLayout(sbr)
+        sbr = QHBoxLayout(); sbr.addWidget(s.spawn_click); sbr.addWidget(ring); sbr.addWidget(clr); sbr.addStretch(1); sbl.addLayout(sbr)
+        zr = QHBoxLayout(); zr.addWidget(QLabel('Height z:')); zr.addWidget(s.spawn_z, 1); zr.addWidget(setz); sbl.addLayout(zr)
         s.objname = QLineEdit(); s.objname.setClearButtonEnabled(True); s.objname.editingFinished.connect(s.edit_objname)
         s.objname.setToolTip('The BZW name of this object, shown in the Objects tab and saved in the map. Leave it blank for no name '
                              '(the list then calls it box1, group1 and so on). Spaces become underscores.')
@@ -6128,6 +6339,28 @@ class Win(QMainWindow):
         if not s.editing_member: s.m.sync_family(o)
         s.busy = True; s.m.changed.emit(); s.busy = False
 
+    def toggle_spawn_click(s, on):
+        """'Click map to add': while it is down, clicks on the 2D map add spawn spots to the selected hardpoint."""
+        if s.busy: return
+        o = s.current_obj()
+        if on and o is not None and o.t == 'hardpoint' and not s.editing_member:
+            s.m.spawn_pick = o; s.ed.setCursor(Qt.CursorShape.CrossCursor)
+            s.m.warn.emit('Click the 2D map to add spawn points for %s. Esc, or the button again, stops.' % (o.name or 'this hardpoint'))
+        else:
+            s.m.spawn_pick = None; s.ed.unsetCursor()
+            if on: s.busy = True; s.spawn_click.setChecked(False); s.busy = False
+
+    def set_spawn_z(s, v):
+        s.m.spawn_z = None if v <= s.spawn_z.minimum() else float(v)
+
+    def apply_spawn_z(s):
+        """Set all: every spawn spot of this hardpoint gets the height in the Height z box (none = the hardpoint's own)."""
+        o = s.current_obj()
+        if not o or o.t != 'hardpoint' or not o.spawns: return
+        s.m.push(); z = s.m.spawn_z; o.spawns = tuple((dx, dy, z) for dx, dy, _z in o.spawns)
+        if not s.editing_member: s.m.sync_family(o)
+        s.m.changed.emit(); s.show_spawns(o)
+
     def add_spawn_ring(s):
         o = s.current_obj()
         if not o or o.t != 'hardpoint': return
@@ -6135,7 +6368,7 @@ class Win(QMainWindow):
         if not ok: return
         r, ok = QInputDialog.getDouble(s, 'Spawn ring', 'Distance from the hardpoint centre:', round(max(o.sx, o.sy) + 40.0, 1), 1.0, 5000.0, 1)
         if not ok: return
-        s.m.push(); o.spawns = tuple(o.spawns) + tuple((dx, dy, None) for dx, dy in spawn_ring(n, r))
+        s.m.push(); o.spawns = tuple(o.spawns) + tuple((dx, dy, s.m.spawn_z) for dx, dy in spawn_ring(n, r))
         if not s.editing_member: s.m.sync_family(o)
         s.m.changed.emit(); s.show_spawns(o)
         s.m.warn.emit('Spawn ring added. Check that the spots are on open ground: nothing here checks them against walls and buildings.')
@@ -6259,6 +6492,8 @@ class Win(QMainWindow):
             s.mat.clear(); s.mat.addItems([''] + sorted(s.m.materials)); s.mat.setCurrentText(o.matref)
             s.objname.setText(object_name(o))
             s.show_spawns(o)
+            if s.m.spawn_pick is not None and s.m.spawn_pick is not o: s.m.spawn_pick = None; s.ed.unsetCursor()   # another object is selected: stop adding
+            s.busy = True; s.spawn_click.setChecked(s.m.spawn_pick is o); s.busy = False
             s.objname.setPlaceholderText(auto_labels(s.m.objs).get(id(o), o.t) if o.t != 'teleporter' else 'teleporter name')
             s.texsize.setText(o.texsize if o.t in ('arc', 'cone', 'box', 'pyramid') else '')
             s.texsize.setPlaceholderText({'arc': '4 numbers, e.g. -2 -2 -8 -8 (blank = default)', 'cone': '2 numbers, e.g. -8 -8 (blank = default)',
@@ -6320,7 +6555,7 @@ class Win(QMainWindow):
         MaterialsDialog(s.m, os.path.dirname(s.m.path) if s.m.path else None).exec()
 
     def _removed_text(s, gone):
-        names = {'defines': 'group definition', 'materials': 'material', 'texmats': 'texturematrix', 'physics': 'physics driver'}
+        names = {'defines': 'group definition', 'materials': 'material', 'texmats': 'texturematrix', 'physics': 'physics driver', 'dyncols': 'dynamic color'}
         parts = ['%d %s%s' % (len(v), names[k], '' if len(v) == 1 else ('es' if k == 'texmats' else 's')) for k, v in gone.items() if v]
         return ', '.join(parts)
 
@@ -6345,11 +6580,12 @@ class Win(QMainWindow):
         box.setText('This map has %d group definition%s that nothing places.' % (n, '' if n == 1 else 's'))
         extra = [t for t in (len(plan['materials']) and '%d material%s' % (len(plan['materials']), '' if len(plan['materials']) == 1 else 's'),
                              len(plan['texmats']) and '%d texturematrix' % len(plan['texmats']),
+                             len(plan['dyncols']) and '%d dynamic color%s' % (len(plan['dyncols']), '' if len(plan['dyncols']) == 1 else 's'),
                              len(plan['physics']) and '%d physics driver%s' % (len(plan['physics']), '' if len(plan['physics']) == 1 else 's')) if t]
         box.setInformativeText('Remove %s%s before saving? They only take up space in the file, and Undo (Ctrl+Z) brings them back.'
                                % ('it' if n == 1 else 'them', (' along with ' + ', '.join(extra) + ' only they used') if extra else ''))
         box.setDetailedText('\n'.join(['Group definition: ' + x for x in plan['defines']] + ['Material: ' + x for x in plan['materials']] +
-                                       ['Texturematrix: ' + x for x in plan['texmats']] + ['Physics driver: ' + x for x in plan['physics']]))
+                                       ['Texturematrix: ' + x for x in plan['texmats']] + ['Dynamic color: ' + x for x in plan['dyncols']] + ['Physics driver: ' + x for x in plan['physics']]))
         rm = box.addButton('Remove and Save', QMessageBox.ButtonRole.AcceptRole)
         box.addButton('Save As Is', QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton(QMessageBox.StandardButton.Cancel)
@@ -6381,6 +6617,9 @@ class Win(QMainWindow):
 
     def open_texmats(s):
         TexMatrixDialog(s.m).exec()
+
+    def open_dyncols(s):
+        DynamicColorDialog(s.m).exec()
 
     def open_world(s):
         old = s.m.W
@@ -6430,7 +6669,7 @@ class Win(QMainWindow):
         except Exception as e:
             QMessageBox.warning(s, 'Generate Terrain', 'The terrain could not be added: %s' % e); return
         s.m.push()
-        g = s.m.place_content('terrain', objs, defines, materials, texmats, physics, 0, 0)
+        g = s.m.place_content('terrain', objs, defines, materials, texmats, physics, {}, 0, 0)
         s.m.select(g); s.m.changed.emit()
         s.statusBar().showMessage('Terrain added. The ground is at z = %g: put bases and other objects at that height. '
                                   'Tanks need -set _noClimb 0 to climb the slopes.' % dlg.run_p.flat_z, 20000)
@@ -6480,7 +6719,7 @@ class Win(QMainWindow):
         if not dlg.exec(): return
         name, cat, desc, _split = dlg.values()
         if not s._confirm_replace(name): return
-        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials, s.m.texmats, physics=s.m.physics)
+        try: save_library_object(name, cat, desc, usable, s.m.defines, s.m.materials, s.m.texmats, physics=s.m.physics, dyncols=s.m.dyncols)
         except OSError as e:
             QMessageBox.warning(s, 'Save failed', str(e)); return
         msg = 'Saved "%s" to My Objects.' % name
@@ -6502,7 +6741,7 @@ class Win(QMainWindow):
         if not meshes:
             QMessageBox.information(s, 'Import mesh', 'No mesh object was found in that file.'); return
         s.m.push()
-        rename, pmap = s.m.merge_resources(materials, texmats, physics)  # their materials, texturematrix and physics drivers come along
+        rename, pmap = s.m.merge_resources(materials, texmats, physics, _world.get('dyncols'))  # their materials, texturematrix and physics drivers come along
         _rename_material_in(meshes, rename); _rename_phydrv_in(meshes, pmap)
         for mo in meshes:
             mo.uid = s.m.nid; s.m.nid += 1
