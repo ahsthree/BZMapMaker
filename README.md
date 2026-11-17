@@ -8,6 +8,10 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 **Current release: 1.5.4** · [Download](../../releases) a ready-to-run package for Debian/Ubuntu, Windows or macOS, or run the single `bzmapmaker.py` script on anything with Python.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
+</p>
+
 
 ## What's new in 1.5.4
 
@@ -15,9 +19,8 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 - **Hardpoint spawn points: heights and click to add.** The **Spawn points** box of a hardpoint has three new controls. **Click map to add** puts the 2D map in a mode where each click adds a spawn spot at that place (snapping applies; Esc or pressing the button again stops, and selecting another object also ends it). **Height z** sets the height of spots you add with the buttons (*hardpoint height* means no z is written, so the plugin uses the hardpoint's own), and **Set all** gives every spot of that hardpoint the same height. A single spot can have its own height by writing `x y z` on its line. Spots added by clicking or by a ring follow symmetry like the rest of the hardpoint.
 - **Portable zip for Windows, macOS and Linux.** `BZMapMaker-1.5.4-portable.zip` holds the program, its objects and a starter script for each system (`Start-Windows.bat`, `Start-Mac.command`, `start-linux.sh`). It needs Python 3.9 or newer; the first run sets up PyQt6, NumPy and PyOpenGL in a `.venv` folder next to it (this needs the internet once), and later runs start straight away. It is the same program as the packages, just run from source; use it if a package for your system isn't available.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/ahsthree/BZMapMaker/main/assets/images/bzmapmaker-features1.5.1.jpeg" alt="BZ Map Maker v1.5.1 Feature Guide" width="100%" style="max-width: 800px;" />
-</p>
+
+
 
 ## What's new in 1.5.3
 
@@ -30,7 +33,7 @@ A cross-platform map editor for [BZFlag](https://www.bzflag.org/), inspired by t
 
 ## What's new in 1.5.2
 
-- **Border size for teleporters.** Select a teleporter and use the new **Border size** box to set the width of its frame (the BZW `border` line). Leave it at *default* and nothing is written, so BZFlag uses its own width (1.12 in the BZW documentation); a border already in a map is read, shown and kept, and symmetry copies share it. The 3D preview does not draw the frame, so you'll see the difference in BZFlag.
+- **Border size for teleporters.** Select a teleporter and use the **Border size** box to set the width of its frame (the BZW `border` line). Tick **Default** and nothing is written, so BZFlag uses its own width (1.12 in the BZW documentation); untick it to set the width yourself, all the way down to **0 for no border** at all (a `border 0` line). A border already in a map is read, shown and kept (including 0), and symmetry copies share it. The 3D preview does not draw the frame, so you'll see the difference in BZFlag.
 - **Older maps are repaired when you open them, by their old numbers.** A teleporter with no name (or a repeated one) is named by its place in the old numbered sequence: the first teleporter in the file is `0`, the next `1`, and so on, which is what older maps' links like `from 2:f` count. So a repaired map reads `name 2` and `from 2:f`: the same numbers the old links used, now written out in full. A number still points at the same teleporter when others have real names. Links the panel can't show are kept as written: wildcards (`*:f`), several links from one teleporter face, and links into a group (`span:tin:f`); renaming a teleporter renames them too. Lines this editor doesn't know in a block are kept instead of dropped, such as a group's `shear` or a teleporter's `horizontal`.
 - **Hardpoints.** A new **Hardpoint** tool in the toolbar places the map object of the BZFS Hardpoint plugin. Click for a default 30 × 30 × 30 hardpoint, or drag corner to corner, then set its position, size, rotation and name in the panel (size works like a box's: half-widths across, full height). Shift+drag in the 2D view turns it. Every hardpoint has its own name (`hardpoint1`, `hardpoint2`, ...; change it in the Name box, and a name already in use is refused). It is saved as a `hardpoint` block with `name`, `pos` and `size` lines, plus a `rot` line when it is turned, and any other lines in such a block are kept exactly as they are (a `rotation` line is read as `rot`). The real game never draws a hardpoint, so the editor shows it as a see-through amber box (with a cross in the 2D view); put a visible box or mesh over it if players should see it. Hardpoints follow symmetry like any other object and stay at the top level of the map rather than inside a group. **Spawn points:** a hardpoint can list `spawn` lines (`spawn 70 0`, or `spawn 70 0 5` to give a height; without one the plugin uses the hardpoint's own height), the spots where players spawn for that hardpoint, chosen at random and facing it. In the panel, the **Spawn points** box takes one `x y` (or `x y z`) per line in world coordinates, **Add a ring...** fills in an evenly spaced ring around the hardpoint (for a 30-wide hardpoint the suggested distance is 70), and **Clear** removes them. They show as green dots with a tick pointing at the hardpoint in the 2D view and as thin green posts in the 3D view. They move with the hardpoint and follow symmetry like its position, and are saved in world coordinates. Nothing in the editor checks that a spot is clear of walls and buildings, so place them on open ground. With no `spawn` lines the plugin asks the server for safe spots itself.
 
